@@ -1,0 +1,16 @@
+version: "3"
+
+services:
+  zookeeper:
+    image: zookeeper
+    ports:
+      - "2181:2181"
+    # restart: always
+
+    networks:
+      - distributed-queue
+
+
+
+networks:
+  distributed-queue:
