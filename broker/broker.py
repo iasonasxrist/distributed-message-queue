@@ -20,8 +20,8 @@ class Broker:
         Initializes the broker with a unique id and sets up connection to zookeeper.
         """
         self.broker_id = broker_id if broker_id else str(uuid.uuid4())
-        self.zkClient_hosts = os.getenv("ZOOKEEPER_HOST", "localhost:2181")
-        self.registration_path = os.getenv("REGISTRATION_ZK_PATH", "topics")
+        self.zkClient_hosts = os.getenv("ZOOKEEPER_HOST")
+        self.registration_path = os.getenv("REGISTRATION_ZK_PATH")
         self.local_storage = defaultdict(list) #key: partition_id, value: list of messages.
         self.connection = False
         self.externalClusterManager = ex()

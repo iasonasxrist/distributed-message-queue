@@ -4,7 +4,6 @@ import time
 from kazoo.retry import KazooRetry # type: ignore
 from kazoo.client import KazooClient, KazooState  # type: ignore
 import os
-from broker.broker import Broker
 from collections import defaultdict
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -180,6 +179,6 @@ class ExternalClusterManager:
     
 
 
-
+    def write_message_to_broker(self)
 
 
