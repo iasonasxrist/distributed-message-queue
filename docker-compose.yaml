@@ -5,23 +5,38 @@ services:
     image: zookeeper
     ports:
       - "2181:2181"
-    restart: always
-
+    environment:
+     - ZOOKEEPER_HOST=zookeeper:2181
     networks:
       - distributed-queue
+    restart: always
 
   producer:
     build:
       context: ./producer
       dockerfile: Dockerfile
     expose:
-      - "5000"
+      - "5000:5000"
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
     networks:
       - distributed-queue
     depends_on:
       - zookeeper
+      - broker
 
-
+  broker:
+    build:
+      context: ./broker
+      dockerfile: Dockerfile
+    scale: 
+      3
+    expose:
+      - "5001:5001"
+    networks:
+      - distributed-queue
+    depends_on:
+      - zookeeper
 
 
 
