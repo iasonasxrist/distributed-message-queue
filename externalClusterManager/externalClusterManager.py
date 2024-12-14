@@ -1,9 +1,11 @@
 import logging
 import json
 import time
-from kazoo.retry import KazooRetry
-from kazoo.client import KazooClient, KazooState
+from kazoo.retry import KazooRetry # type: ignore
+from kazoo.client import KazooClient, KazooState  # type: ignore
 import os
+from broker.broker import Broker
+from collections import defaultdict
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -11,25 +13,21 @@ class ExternalClusterManager:
     """
     Manages topics in ZooKeeper, including creation and verification.
     """
-    
+
     def __init__(self):
         """
         Initializes the topic manager with the ZooKeeper connection details.
-        Args:
-            zkClient_hosts (str): Comma-separated list of ZooKeeper host:port strings.
         """
-        self.zkClient = os.getenv("zk_host", "localhost:2181")
+        self.zkClient = os.getenv("ZOOKEEPER_HOST", "localhost:2181")
         self.num_partitions = int(os.getenv("num_partitions", "3"))  # Default to 1 partition if not specified
         self.connection=False
-        print(type(self.num_partitions ))
-
+        self.registration_path = os.getenv("ZOOKEEPER_HOST")
         try:
         
             self.zkClient.try_connect()
             self.zkClient.healthCheck()
         except:
             raise Exception("Zookeeper client failed to be started")
-
 
     def start(self):
         if not self.zkClient:
@@ -39,7 +37,6 @@ class ExternalClusterManager:
         self.zkClient= KazooClient(hosts=self.zkClient, connection_retry=self.kz_retry, command_retry=self.kz_retry)
         
         logging.info("ExternalClusterManager initialized, connection to ZooKeeper started")
-
         
     def try_connect(self, max_retries=5, retry_delay=1):
         for i in range(max_retries):
@@ -53,7 +50,6 @@ class ExternalClusterManager:
                     continue
                 else:
                     raise Exception("Could not connect to ZooKeeper after multiple attempts") from e
-   
 
     def healthCheck(self):
         @self.zkClient.add_listener
@@ -68,8 +64,6 @@ class ExternalClusterManager:
                 logging.info("Connected to Zookeeper")
                 self.connection = True
 
-            
-
     def stop(self):
         """
         Stops and closes the ZooKeeper client connection.
@@ -78,14 +72,12 @@ class ExternalClusterManager:
         self.zkClient.close()
         logging.info("ExternalClusterManager connection to ZooKeeper closed")
 
-# MUST IMPLEMENT ON PRODUCER
     def create_topic(self, topic_name):
         """
         Creates a topic structure in ZooKeeper, including metadata and partitions.
 
         Args:
             topic_name (str): The name of the topic to create.
-            num_partitions (int): The number of partitions for the topic.
         """
         num_partitions= os.getenv("num_partitions", 3)
 
@@ -95,29 +87,77 @@ class ExternalClusterManager:
         logging.info(f"Creating topic '{topic_name}' with {num_partitions} partitions.")
 
         try:
-            topic_path = f"/topics/{topic_name}"
-            self.zkClient.ensure_path(topic_path)
+            topic_path = f"/{os.getenv("REGISTRATION_ZK_PATH")}/{topic_name}"
+            self.zkClient.ensure_path(os.path.dirname(topic_path))
             logging.info(f"Created or ensured topic path '{topic_path}'")
 
             # Create Metadata
             metadata_path = f"{topic_path}/metadata"
             metadata_data = {"partitions": num_partitions}
-            self.zkClient.create(metadata_path, value=json.dumps(metadata_data).encode(), makepath=True)
+            self.zkClient.create(metadata_path,  ephemeral=True, sequence=True, value=json.dumps(metadata_data).encode(), makepath=True)
             logging.info(f"Created metadata path '{metadata_path}' with data: {metadata_data}")
 
-            # Create Partitions and Broker
-            for i in range(num_partitions):
-                partition_path = f"{topic_path}/partition{i}"
-                self.zkClient.ensure_path(partition_path)
-                broker_path = f"{partition_path}/broker"
-                self.zkClient.create(broker_path, value=str(i + 1).encode(), makepath=True)  # Use a different broker ID for each partition
-                logging.info(f"Created broker '{broker_path}' for partition {i}")
+            self.assign_brokers_to_partitions(topic_name)
 
             logging.info(f"Successfully created topic '{topic_name}'")
 
         except Exception as e:
             logging.error(f"An error occurred creating topic '{topic_name}': {e}")
 
+    def get_available_brokers_per_partition_per_topic(self, topic_name):
+        """
+        Retrieves a dictionary of brokers for each partition of a given topic.
+
+        Returns:
+            dict: A dictionary where keys are partition IDs and values are
+                  lists of broker IDs assigned to those partitions.
+        """
+        brokers_per_partition = defaultdict(list)
+        try:
+            topic_path = f"/{os.getenv('REGISTRATION_ZK_PATH', 'topics')}/{topic_name}"
+            if not self.zkClient.exists(topic_path):
+                logging.warning(f"Topic path '{topic_path}' does not exist.")
+                return {}
+
+            for i in range(self.num_partitions):
+                partition_id = f"partition{i}"
+                partition_path = f"{topic_path}/{partition_id}"
+                broker_path = f"{partition_path}/broker"
+                if self.zkClient.exists(broker_path):
+                  data, _ = self.zkClient.get(broker_path)
+                  broker_id = data.decode()
+                  brokers_per_partition[partition_id].append(broker_id)
+                  logging.debug(f"Found broker '{broker_id}' for partition '{partition_path}'")
+                else:
+                  logging.warning(f"Broker not found at '{broker_path}'")
+            return brokers_per_partition
+
+        except Exception as e:
+           logging.error(f"Error while retrieving brokers per partition: {e}")
+           return {}
+        
+    def assign_brokers_to_partitions(self, topic_name):
+        """
+        Assigns brokers to the topic partitions.
+        """
+        brokers_per_partition = self.get_available_brokers_per_partition_per_topic(topic_name)
+        if not brokers_per_partition:
+            logging.warning("No brokers available for the partition assignments")
+            return
+        
+        for partition_id, available_brokers in brokers_per_partition.items():
+           partition_path = f"/{os.getenv('REGISTRATION_ZK_PATH', 'topics')}/{topic_name}/{partition_id}"
+           self.zkClient.ensure_path(partition_path)
+           if available_brokers:
+              # Assign one broker to this partition
+              # we can implement any assignment logic here, for example choosing the first broker available.
+              assigned_broker = available_brokers[0]
+              broker_path = f"{partition_path}/broker"
+              self.zkClient.create(broker_path, value=assigned_broker.encode(), makepath=True)
+              logging.info(f"Assigned broker '{assigned_broker}' to partition {partition_id}")
+           else:
+              logging.warning(f"No brokers available for partition: '{partition_id}' of topic '{topic_name}'")
+          
     def topic_exists(self, topic_name):
         """
         Check if the topic exists in ZooKeeper.
@@ -127,13 +167,19 @@ class ExternalClusterManager:
         Returns:
             (bool): True if exists, False otherwise
         """
-        topic_path = f"/topics/{topic_name}"
+        topic_path = f"/{self.registration_path}/{topic_name}"
         return self.zkClient.exists(topic_path) is not None
+   
+    def get_topics(self):
+
+        """
+        Retrieves the list of available topics registered in zookeeper.
+        """
+        topic_path = f"/{os.getenv("REGISTRATION_ZK_PATH")}"
+        return sorted(self.zkClient.get_children(topic_path))
+    
 
 
-    # topic_name = "example-topic-2"
-    # topic_manager.create_topic(topic_name=topic_name)
-    # exists = topic_manager.topic_exists(topic_name="example-topic")
-    # logging.info(f"Topic 'example-topic' exists: {exists}")
-    # exists = topic_manager.topic_exists(topic_name=topic_name)
-    # logging.info(f"Topic '{topic_name}' exists: {exists}")
+
+
+
