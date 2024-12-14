@@ -106,11 +106,15 @@ class Broker:
         Check if this broker is the one registered to store messages for the topic and partition, using the data from Zookeeper.
         """
         try:
-            partition_path = f"/{self.registration_path}/{topic_name}/{partition_id}/broker"
+            partition_path = f"/{self.registration_path}/{topic_name}/{partition_id}"
             if self.zkClient.exists(partition_path):
-                data, _ = self.zkClient.get(partition_path)
-                broker_id = data.decode()
-                return broker_id == self.broker_id
+                children = self.zkClient.get_children(partition_path)
+                for child in children:
+                    if child.startswith("broker"):
+                        broker_path = f"{partition_path}/{child}"
+                        data, _ = self.zkClient.get(broker_path)
+                        broker_id = data.decode()
+                        return broker_id == self.broker_id
             return False
         except Exception as e:
            logging.error(f"Error checking if broker is responsible for topic: {e}")
