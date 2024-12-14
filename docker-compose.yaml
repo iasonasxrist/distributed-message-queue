@@ -5,10 +5,23 @@ services:
     image: zookeeper
     ports:
       - "2181:2181"
-    # restart: always
+    restart: always
 
     networks:
       - distributed-queue
+
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    expose:
+      - "5000"
+    networks:
+      - distributed-queue
+    depends_on:
+      - zookeeper
+
+
 
 
 
