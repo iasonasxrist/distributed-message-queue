@@ -15,7 +15,7 @@ class Producer:
         Initializes the producer with the ZooKeeper connection details and the number of partitions.
 
         Args:
-            zk_hosts (str): Comma-separated list of ZooKeeper host:port strings.
+            ZOOKEEPER_HOST (str): Comma-separated list of ZooKeeper host:port strings.
             num_partitions (int): The number of partitions for the topic
         """
         self.externalClusterManager = ex.ExternalClusterManager()
@@ -55,6 +55,13 @@ class Producer:
         except:
             logging.error(f"An error occurred during message production: {e}")
 
+    def get_topics(self):
+        topics = self.externalClusterManager.getTopics()
+        if not topics:
+            return []
+        return topics
+    
+
 @app.route("/produce/<topic_name>", methods=["POST"])
 def handle_produce(topic_name):
     message = request.get_json().get("message")
@@ -67,10 +74,14 @@ def handle_produce(topic_name):
     producer.produce(topic_name, message)
     return jsonify({"message": "Message produced successfully"})
 
+@app.route("/get-topics/", methods=["GET"])
+def get_topics():
+    topics = producer.get_topics()
+    return jsonify(topics)
 
 if __name__ == "__main__":
     try:
        producer = Producer() 
-       app.run(host="0.0.0.0", port=os.getenv("PORT"))
+       app.run(host="0.0.0.0", port=os.getenv("PRODUCER_PORT"))
     except Exception as e:
         logging.error(f"Application failed to start {e}")

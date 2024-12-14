@@ -15,7 +15,7 @@ class Broker:
         Initializes the broker with the ZooKeeper connection details and the number of partitions.
 
         Args:
-            zk_hosts (str): Comma-separated list of ZooKeeper host:port strings.
+            ZOOKEEPER_HOST (str): Comma-separated list of ZooKeeper host:port strings.
             num_partitions (int): The number of partitions for the topic
         """
         self.externalClusterManager = ex.ExternalClusterManager()

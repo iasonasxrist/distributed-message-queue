@@ -1,3 +1,2 @@
 Flask
-kazoo
 requests

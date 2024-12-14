@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-EXPOSE 5000
+EXPOSE 5001
 
 # Run app.py when the container launches
 CMD ["python", "-m", "broker.broker"]
