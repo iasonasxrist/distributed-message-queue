@@ -13,8 +13,8 @@ services:
 
   producer:
     build:
-      context: ./producer
-      dockerfile: Dockerfile
+      context: ./
+      dockerfile: ./producer/Dockerfile
     expose:
       - "5000:5000"
     environment:
@@ -27,8 +27,8 @@ services:
 
   broker:
     build:
-      context: ./broker
-      dockerfile: Dockerfile
+      context: ./
+      dockerfile: ./broker/Dockerfile
     scale: 
       3
     expose:
