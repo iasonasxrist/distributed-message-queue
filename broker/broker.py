@@ -3,13 +3,12 @@ import os
 from flask import Flask, jsonify, request, redirect  # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
 import uuid
-from kazoo.retry import KazooRetry  # type: ignore
-from kazoo.client import KazooClient, KazooState # type: ignore
 from collections import defaultdict
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
 class Broker:
     """
     Manages message storage, partition assignment and the connection to zookeeper.
@@ -20,7 +19,6 @@ class Broker:
         Initializes the broker with a unique id and sets up connection to zookeeper.
         """
         self.broker_id = broker_id if broker_id else str(uuid.uuid4())
-        self.zkClient_hosts = os.getenv("ZOOKEEPER_HOST")
         self.registration_path = os.getenv("REGISTRATION_ZK_PATH")
         self.local_storage = defaultdict(list) #key: partition_id, value: list of messages.
         self.connection = False
@@ -32,28 +30,10 @@ class Broker:
         Establishes connection to zookeeper
         """
         try:
-            self.kz_retry = KazooRetry(max_tries=1000, delay=0.5, backoff=2)
-            self.zkClient = KazooClient(hosts=self.zkClient_hosts, connection_retry=self.kz_retry, command_retry=self.kz_retry)
-            self.zkClient.start()
-            logging.info("Broker connection to ZooKeeper started")
-            self.healthCheck()
             self.register_broker()
         except Exception as e:
              logging.error(f"Error connecting to zookeeper: {e}")
              raise
-    def healthCheck(self):
-        @self.zkClient.add_listener
-        def checkConnectionStatus(status):
-            if status == KazooState.LOST:
-                logging.warning("Connection to ZooKeeper lost")
-                self.connection = False
-            elif status == KazooState.SUSPENDED:
-                logging.warning("Connection to ZooKeeper suspended")
-                self.connection = False
-            else:
-                logging.info("Connected to Zookeeper")
-                self.connection = True
-
 
     def register_broker(self):
         """
@@ -61,7 +41,7 @@ class Broker:
         """
         broker_path = f"/brokers/{self.broker_id}"
         try:
-            self.zkClient.create(broker_path, value=b"", makepath=True)
+            self.externalClusterManager.zkClient.create(broker_path, value=b"", makepath=True)
             logging.info(f"Broker registered in ZooKeeper at: {broker_path}")
         except Exception as e:
             logging.error(f"Failed to register broker: {e}")
@@ -73,16 +53,16 @@ class Broker:
         """
         try:
            broker_path = f"/brokers/{self.broker_id}"
-           if self.zkClient.exists(broker_path):
-            self.zkClient.delete(broker_path)
+           if self.externalClusterManager.exists(broker_path):
+            self.externalClusterManager.delete(broker_path)
             logging.info(f"Broker unregistered from ZooKeeper at: {broker_path}")
            else:
             logging.warning(f"Broker was not registered, skipping unregistration from zookeeper")
         except Exception as e:
             logging.error(f"Error while unregistering broker: {e}")
         finally:
-           self.zkClient.stop()
-           self.zkClient.close()
+           self.externalClusterManager.stop()
+           self.externalClusterManager.close()
            logging.info("Broker connection to zookeeper closed")
 
     def has_partition(self, topic_name, partition_id):
@@ -107,12 +87,12 @@ class Broker:
         """
         try:
             partition_path = f"/{self.registration_path}/{topic_name}/{partition_id}"
-            if self.zkClient.exists(partition_path):
-                children = self.zkClient.get_children(partition_path)
+            if self.externalClusterManager.exists(partition_path):
+                children = self.externalClusterManager.get_children(partition_path)
                 for child in children:
                     if child.startswith("broker"):
                         broker_path = f"{partition_path}/{child}"
-                        data, _ = self.zkClient.get(broker_path)
+                        data, _ = self.externalClusterManager.get(broker_path)
                         broker_id = data.decode()
                         return broker_id == self.broker_id
             return False
@@ -174,6 +154,3 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=os.getenv("BROKER_PORT", 5000))
     except Exception as e:
         logging.error(f"Application failed to start {e}")
-    finally:
-      if 'broker' in locals() and broker:
-        broker.stop()
