@@ -6,10 +6,10 @@ from externalClusterManager.externalClusterManager import ExternalClusterManager
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
 
 
 class Producer:
-
     def __init__(self):
         """
         Initializes the producer with the ZooKeeper connection details and the number of partitions.
@@ -18,9 +18,8 @@ class Producer:
             ZOOKEEPER_HOST (str): Comma-separated list of ZooKeeper host:port strings.
             num_partitions (int): The number of partitions for the topic
         """
-        self.externalClusterManager = ex.ExternalClusterManager()
-        self.externalClusterManager.start()
-        self.externalClusterManager.healthCheck()
+    
+        self.externalClusterManager = ex()
         self.num_of_partitions= os.getenv("num_of_partitions") 
 
         logging.info("Producer initialized, connection to zookeeper started")
@@ -51,12 +50,11 @@ class Producer:
         try:
             self.externalClusterManager.create_topic(topic_name)
             logging.info(f"Message '{message}' sent to topic '{topic_name}'.")
-
         except:
             logging.error(f"An error occurred during message production: {e}")
 
     def get_topics(self):
-        topics = self.externalClusterManager.getTopics()
+        topics = self.externalClusterManager.get_topics()
         if not topics:
             return []
         return topics
