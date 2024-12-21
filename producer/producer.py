@@ -69,13 +69,18 @@ class Producer:
 
 @app.route("/produce/<topic_name>", methods=["POST"])
 def handle_produce(topic_name):
+
     message = request.get_json().get("message")
     if not message:
         return jsonify({"error": "Missing message"}), 400
     
     if not topic_name:
-        print("okkkk")
         producer.create_topic(topic_name, message)
+
+    topics = producer.get_topics()
+    if topic_name in topics:
+       return jsonify({"error": "Already exists"}), 400
+
 
     producer.produce(topic_name, message)
     return jsonify({"message": "Message produced successfully"})
