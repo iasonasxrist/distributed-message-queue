@@ -6,12 +6,12 @@ WORKDIR /app
 # Copy requirements file
 COPY . /app
 
-ENV PYTHONPATH=/app
+# ENV PYTHONPATH=/app
 
 RUN pip install --no-cache-dir -r broker/requirements.txt
 
 
-EXPOSE 5001
+EXPOSE 5000
 
 # Run app.py when the container launches
 CMD ["python3", "-m", "broker.broker"]

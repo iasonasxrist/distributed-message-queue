@@ -5,6 +5,8 @@ import kazoo
 from kazoo.client import KazooClient, KazooState 
 import os
 from collections import defaultdict
+from dotenv import load_dotenv
+
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
@@ -73,7 +75,7 @@ class ExternalClusterManager:
         num_partitions= os.getenv("num_partitions", 3)
 
         if num_partitions is None:
-            num_partitions = self.num_partitions  # Use the default number of partitions from the environment
+            num_partitions = self.num_partitions
 
         logging.info(f"Creating topic '{topic_name}' with {num_partitions} partitions.")
 

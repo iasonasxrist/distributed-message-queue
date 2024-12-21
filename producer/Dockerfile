@@ -6,11 +6,11 @@ WORKDIR /app
 # Copy requirements file
 COPY . /app
 
-ENV PYTHONPATH=/app
+# ENV PYTHONPATH=/app
 
 RUN pip install --no-cache-dir -r producer/requirements.txt
 
-EXPOSE 5000
+EXPOSE 5001
 
 # Run app.py when the container launches
 CMD ["python3", "-m", "producer.producer"]

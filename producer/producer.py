@@ -2,7 +2,7 @@ import logging
 import os
 from flask import Flask, jsonify, request, redirect # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
-
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,10 +21,17 @@ class Producer:
     
         self.externalClusterManager = ex()
         self.num_of_partitions= os.getenv("num_of_partitions") 
-
+        print(f"{self.num_of_partitions}*****************")
         logging.info("Producer initialized, connection to zookeeper started")
 
-    
+    def start(self):
+        try:
+            app.run(host="0.0.0.0", port=os.getenv("PRODUCER_PORT"))
+            logging.info("Server is up and running")
+                 
+        except Exception as e:
+            logging.error(f"Application failed to start {e}")
+
     def create_topic(self, topic_name):
         """
         Creates a topic using the externalClusterManager
@@ -67,6 +74,7 @@ def handle_produce(topic_name):
         return jsonify({"error": "Missing message"}), 400
     
     if not topic_name:
+        print("okkkk")
         producer.create_topic(topic_name, message)
 
     producer.produce(topic_name, message)
@@ -78,8 +86,6 @@ def get_topics():
     return jsonify(topics)
 
 if __name__ == "__main__":
-    try:
-       producer = Producer() 
-       app.run(host="0.0.0.0", port=os.getenv("PRODUCER_PORT"))
-    except Exception as e:
-        logging.error(f"Application failed to start {e}")
+    producer = Producer()
+    producer.start()
+ 

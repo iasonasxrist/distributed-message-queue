@@ -4,6 +4,8 @@ from flask import Flask, jsonify, request, redirect  # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
 import uuid
 from collections import defaultdict
+from dotenv import load_dotenv
+
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -151,6 +153,6 @@ if __name__ == "__main__":
     try:
         broker = Broker()
         broker.start()
-        app.run(host="0.0.0.0", port=os.getenv("BROKER_PORT", 5000))
+        app.run(host="0.0.0.0", port=os.getenv("BROKER_PORT"))
     except Exception as e:
         logging.error(f"Application failed to start {e}")
