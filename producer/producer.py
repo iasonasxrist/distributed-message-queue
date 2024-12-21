@@ -1,8 +1,10 @@
 import logging
 import os
-from flask import Flask, jsonify, request, redirect # type: ignore
+from flask import Flask, jsonify, request  # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
 from dotenv import load_dotenv
+
+load_dotenv() # Load environment variables
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,10 +15,6 @@ class Producer:
     def __init__(self):
         """
         Initializes the producer with the ZooKeeper connection details and the number of partitions.
-
-        Args:
-            ZOOKEEPER_HOST (str): Comma-separated list of ZooKeeper host:port strings.
-            num_partitions (int): The number of partitions for the topic
         """
     
         self.externalClusterManager = ex()
@@ -28,40 +26,42 @@ class Producer:
         try:
             app.run(host="0.0.0.0", port=os.getenv("PRODUCER_PORT"))
             logging.info("Server is up and running")
-                 
         except Exception as e:
-            logging.error(f"Application failed to start {e}")
+            logging.error(f"Application failed to start: {e}")
 
-    def create_topic(self, topic_name):
+    def create_topic(self, topic_name)->bool:
         """
         Creates a topic using the externalClusterManager
         """
         if not self.externalClusterManager.topic_exists(topic_name):
             logging.info("Topic does not exist, attempting creation")
-            self.externalClusterManager.create_topic(topic_name)
+            success = self.externalClusterManager.create_topic(topic_name) # Store if the topic creation was succesful
+            return success # Return the success value from cluster manager
         else:
             logging.info(f"Topic with name: '{topic_name}' already exists, not creating it")
+            return True
             
     
     def produce(self, topic_name, message):
         """
-        Simulates writing a message to a topic, using the metadata stored in ZooKeeper to identify the correct partition
+        Simulates writing a message to a topic.
 
         Args:
             topic_name (str): The name of the topic to write to.
             message (str): The message to send.
         """
         logging.info(f"Producing message '{message}' to topic '{topic_name}'")
-
-
         try:
-            self.externalClusterManager.create_topic(topic_name)
+            # Do not create a topic every time a message is produced.
             logging.info(f"Message '{message}' sent to topic '{topic_name}'.")
-        except:
-            logging.error(f"An error occurred during message production: {e}")
+            return True # Return True if successful.
 
-    def get_topics(self):
-        topics = self.externalClusterManager.get_topics()
+        except Exception as e:
+            logging.error(f"An error occurred during message production: {e}")
+            return False # Return False if message production fails.
+
+    def get_topics(self)-> list:
+        topics = self.externalClusterManager.retrieve_topics()
         if not topics:
             return []
         return topics
@@ -69,22 +69,30 @@ class Producer:
 
 @app.route("/produce/<topic_name>", methods=["POST"])
 def handle_produce(topic_name):
-
-    message = request.get_json().get("message")
-    if not message:
-        return jsonify({"error": "Missing message"}), 400
+    try:
+        message = request.get_json().get("message")
+        if not message or not topic_name:
+            return jsonify({"error": "Missing payload"}), 400
+        
+        topics = producer.get_topics()
+        if topic_name in topics:
+            return jsonify({"error": "Topic already exists"}), 409 # Use 409 Conflict
+        
+        success = producer.create_topic(topic_name)
+        if not success:
+            return jsonify({"error": "Failed to create topic"}), 500
+            
+        success = producer.produce(topic_name, message) # Store if the message was produced successfully
+        if not success:
+           return jsonify({"error": "Failed to produce message"}), 500
+        return jsonify({"message": "Message produced successfully"}), 201 # Use 201 Created
     
-    if not topic_name:
-        producer.create_topic(topic_name, message)
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+        return jsonify({"error": "An unexpected error occurred ", }), 500 # Return generic error and log it.
+        
 
-    topics = producer.get_topics()
-    if topic_name in topics:
-       return jsonify({"error": "Already exists"}), 400
-
-
-    producer.produce(topic_name, message)
-    return jsonify({"message": "Message produced successfully"})
-
+    
 @app.route("/get-topics/", methods=["GET"])
 def get_topics():
     topics = producer.get_topics()
@@ -93,4 +101,3 @@ def get_topics():
 if __name__ == "__main__":
     producer = Producer()
     producer.start()
- 

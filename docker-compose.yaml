@@ -35,8 +35,9 @@ services:
       context: ./
       dockerfile: ./broker/Dockerfile
     scale: 3
-    expose:
+    ports:
       - 5000
+
     environment:
       - BROKER_PORT=5000
       - ZOOKEEPER_HOST=zookeeper:2181

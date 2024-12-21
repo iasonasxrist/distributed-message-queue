@@ -8,8 +8,8 @@ COPY . /app
 
 # ENV PYTHONPATH=/app
 
-RUN pip install --no-cache-dir -r producer/requirements.txt
-
+# RUN pip install --no-cache-dir -r producer/requirements.txt
+RUN pip install -r producer/requirements.txt
 EXPOSE 5001
 
 # Run app.py when the container launches
