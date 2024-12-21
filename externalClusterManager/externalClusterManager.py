@@ -1,12 +1,13 @@
 import logging
 import json
 import time
-from kazoo.retry import KazooRetry # type: ignore
-from kazoo.client import KazooClient, KazooState  # type: ignore
+import kazoo
+from kazoo.client import KazooClient, KazooState 
 import os
 from collections import defaultdict
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
 
 class ExternalClusterManager:
     """
@@ -17,31 +18,22 @@ class ExternalClusterManager:
         """
         Initializes the topic manager with the ZooKeeper connection details.
         """
-        self.zkClient = os.getenv("ZOOKEEPER_HOST", "localhost:2181")
         self.num_partitions = int(os.getenv("num_partitions", "3"))  # Default to 1 partition if not specified
-        self.connection=False
+        self.connection = False
         self.registration_path = os.getenv("ZOOKEEPER_HOST")
+        self.zkClient= KazooClient(hosts=ZOOKEEPER_HOST)
+
         try:
         
-            self.zkClient.try_connect()
-            self.zkClient.healthCheck()
-        except:
-            raise Exception("Zookeeper client failed to be started")
-
-    def start(self):
-        if not self.zkClient:
-            logging.error("Check connection string connection to ExternalClusterManager")
-
-        self.kz_retry = KazooRetry(max_tries=1000, delay=0.5, backoff=2)
-        self.zkClient= KazooClient(hosts=self.zkClient, connection_retry=self.kz_retry, command_retry=self.kz_retry)
-        
-        logging.info("ExternalClusterManager initialized, connection to ZooKeeper started")
+            self.try_connect()
+            self.healthCheck()
+        except Exception as e:
+            raise Exception(f"Zookeeper client failed to be started with error {e}")
         
     def try_connect(self, max_retries=5, retry_delay=1):
         for i in range(max_retries):
             try:
                 self.zkClient.start()
-
                 break
             except Exception as e:
                 if i < max_retries - 1:
@@ -179,6 +171,6 @@ class ExternalClusterManager:
     
 
 
-    def write_message_to_broker(self)
+    # def write_message_to_broker(self):
 
 
