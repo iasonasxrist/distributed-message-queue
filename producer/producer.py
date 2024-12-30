@@ -18,8 +18,7 @@ class Producer:
         """
     
         self.externalClusterManager = ex()
-        self.num_of_partitions= os.getenv("num_of_partitions") 
-        print(f"{self.num_of_partitions}*****************")
+        self.num_partitions = int(os.getenv("num_partitions", "3"))  # Default to 3 partition if not specified
         logging.info("Producer initialized, connection to zookeeper started")
 
     def start(self):
