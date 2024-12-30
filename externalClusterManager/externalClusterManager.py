@@ -34,6 +34,7 @@ class ExternalClusterManager:
             raise Exception(f"Zookeeper client failed to be started with error {e}")
 
     def ensure_root_path(self):
+    
         """
         Ensure the root registration path exists
         """
@@ -43,6 +44,7 @@ class ExternalClusterManager:
           logging.info(f"Root path created at {root_path}")
         else:
           logging.info(f"Root path found at {root_path}")
+
     def try_connect(self, max_retries=5, retry_delay=1):
         for i in range(max_retries):
             try:
@@ -68,6 +70,7 @@ class ExternalClusterManager:
             else:
                 logging.info("Connected to Zookeeper")
                 self.connection = True
+    
     def stop(self):
         """
         Stops and closes the ZooKeeper client connection.

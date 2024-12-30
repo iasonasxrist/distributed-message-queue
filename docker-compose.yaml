@@ -1,4 +1,4 @@
-version: "3"
+version: "3.8"
 
 services:
   zookeeper:
@@ -34,9 +34,10 @@ services:
     build:
       context: ./
       dockerfile: ./broker/Dockerfile
-    scale: 3
+    deploy:
+      replicas: 3
     ports:
-      - 5000
+      - "6000-6002:5000" 
 
     environment:
       - BROKER_PORT=5000
