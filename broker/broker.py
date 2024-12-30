@@ -1,8 +1,7 @@
 import logging
 import os
-from flask import Flask, jsonify, request, redirect  # type: ignore
+from flask import Flask, jsonify, request  # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
-import uuid
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -10,22 +9,23 @@ from dotenv import load_dotenv
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
+zookeeper_host = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
+hostname = os.environ.get("HOSTNAME")
 class Broker:
     """
     Manages message storage, partition assignment and the connection to zookeeper.
     """
 
-    def __init__(self, broker_id=None):
+    def __init__(self):
         """
         Initializes the broker with a unique id and sets up connection to zookeeper.
         """
-        self.broker_id = broker_id if broker_id else str(uuid.uuid4())
+        self.broker_id = None
         self.registration_path = os.getenv("REGISTRATION_ZK_PATH")
         self.local_storage = defaultdict(list) #key: partition_id, value: list of messages.
-        self.connection = False
         self.externalClusterManager = ex()
-        logging.info(f"***Broker initialized ID: {self.broker_id}***")
+        self.connection = True
+        logging.info(f"***Broker initializing***")
 
     def start(self):
         """
@@ -41,31 +41,26 @@ class Broker:
         """
         Registers the broker in ZooKeeper, creating the `/brokers/<broker_id>` path.
         """
-        broker_path = f"/brokers/{self.broker_id}"
+        broker_path = f"/brokers"
         try:
-            self.externalClusterManager.zkClient.create(broker_path, value=b"", makepath=True)
-            logging.info(f"Broker registered in ZooKeeper at: {broker_path}")
+            registered_path = self.externalClusterManager.registerNode(broker_path, hostname)
+            if registered_path:
+              self.broker_id = registered_path.split("/")[-1]
         except Exception as e:
             logging.error(f"Failed to register broker: {e}")
-            raise
+            raise e
 
     def stop(self):
         """
         Unregisters the broker from ZooKeeper and closes connection
         """
         try:
-           broker_path = f"/brokers/{self.broker_id}"
-           if self.externalClusterManager.exists(broker_path):
-            self.externalClusterManager.delete(broker_path)
-            logging.info(f"Broker unregistered from ZooKeeper at: {broker_path}")
-           else:
-            logging.warning(f"Broker was not registered, skipping unregistration from zookeeper")
+            if self.connection:
+              self.externalClusterManager.close()
+              self.connection = False
+              logging.info("Broker connection to zookeeper closed")
         except Exception as e:
             logging.error(f"Error while unregistering broker: {e}")
-        finally:
-           self.externalClusterManager.stop()
-           self.externalClusterManager.close()
-           logging.info("Broker connection to zookeeper closed")
 
     def has_partition(self, topic_name, partition_id):
         """
@@ -130,15 +125,18 @@ class Broker:
 broker = None
 @app.route("/<topic_name>/has_partition/<partition_id>", methods=["GET"])
 def handle_has_partition(topic_name, partition_id):
-    result = broker.has_partition(topic_name, partition_id)
-    return jsonify(result)
+    try:
+      result = broker.has_partition(topic_name, partition_id)
+      return jsonify(result)
+    except Exception as e:
+      return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 @app.route("/<topic_name>/store/<partition_id>", methods=["POST"])
 def handle_store_message(topic_name, partition_id):
     try:
       message = request.get_json().get("message")
       if not message:
-          return jsonify({"error": "Missing message"}), 400
+        return jsonify({"error": "Missing message"}), 400
       broker.store_message(topic_name, partition_id, message)
       return jsonify({"message": "Message produced successfully"})
     except Exception as e:
@@ -146,8 +144,11 @@ def handle_store_message(topic_name, partition_id):
     
 @app.route("/<topic_name>/get_messages/<partition_id>", methods=["GET"])
 def handle_get_messages(topic_name, partition_id):
-    messages = broker.get_messages(topic_name, partition_id)
-    return jsonify({"messages": messages})
+    try:
+      messages = broker.get_messages(topic_name, partition_id)
+      return jsonify({"messages": messages})
+    except Exception as e:
+      return jsonify({"error": f"Error while retrieving messages: {e}"}), 500
 
 if __name__ == "__main__":
     try:

@@ -42,6 +42,7 @@ services:
     environment:
       - BROKER_PORT=5000
       - ZOOKEEPER_HOST=zookeeper:2181
+      - HOSTNAME=localhost
 
     networks:
       - distributed-queue

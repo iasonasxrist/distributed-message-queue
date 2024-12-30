@@ -17,19 +17,19 @@ class ExternalClusterManager:
     """
     Manages topics in ZooKeeper, including creation and verification.
     """
-
     def __init__(self):
         """
         Initializes the topic manager with the ZooKeeper connection details.
         """
-        self.num_partitions = int(os.getenv("num_partitions", "3"))  # Default to 3 partition if not specified
+        self.num_partitions = int(os.getenv("num_partitions", "3"))
         self.connection = False
-        self.registration_path = os.getenv("REGISTRATION_ZK_PATH", REGISTRATION_ZK_PATH) # Set registration path correctly
+        self.registration_path = os.getenv("REGISTRATION_ZK_PATH", REGISTRATION_ZK_PATH)
         self.zkClient= KazooClient(hosts=ZOOKEEPER_HOST)
         try:
             self.try_connect()
             self.healthCheck()
-            self.ensure_root_path() # Ensure that the root path exists.
+            self.ensure_root_path()
+            # Find available brokers
         except Exception as e:
             raise Exception(f"Zookeeper client failed to be started with error {e}")
 
@@ -79,12 +79,13 @@ class ExternalClusterManager:
         self.zkClient.close()
         logging.info("ExternalClusterManager connection to ZooKeeper closed")
 
-    def create_topic(self, topic_name):
+    def create_topic(self, topic_name, metadata=None):
         """
         Creates a topic structure in ZooKeeper, including metadata and partitions.
 
         Args:
             topic_name (str): The name of the topic to create.
+            metadata (dict): optional dictionary to specify the metadata of the topic, including number of partitions
         """
         num_partitions= int(os.getenv("num_partitions", 3))
 
@@ -100,11 +101,14 @@ class ExternalClusterManager:
 
             # Create Metadata
             metadata_path = f"{topic_path}/metadata"
-            metadata_data = {"partitions": num_partitions}
-            self.zkClient.create(metadata_path, value=json.dumps(metadata_data).encode(), makepath=True)
-            logging.info(f"Created metadata path '{metadata_path}' with data: {metadata_data}")
+            metadata_data = f"partitions: {self.num_partitions}"
+            metadata_bytes = json.dumps(metadata_data).encode() 
+            logging.info("json;loads",json.loads(metadata_bytes.decode()))
+            self.create_or_update_metadata(metadata_path, metadata_bytes)
 
+            # self.assign_leaders_to_partitions(topic_name)
             self.assign_brokers_to_partitions(topic_name)
+
             logging.info(f"Successfully created topic '{topic_name}'")
             return True
 
@@ -112,7 +116,26 @@ class ExternalClusterManager:
             logging.error(f"An error occurred creating topic '{topic_name}': {e}")
             return False
 
-    def get_available_brokers_per_partition_per_topic(self, topic_name):
+
+    def getBrokers(self)-> list:
+        """
+        Retrieves a list of available brokers
+            
+        Returns:
+            list: List of available broker IDs to assign into partitions.
+        """
+        broker_path = "/brokers"
+        try: 
+            if not self.exists(broker_path):
+                return []
+            children = self.get_children(broker_path)
+            return sorted(children)
+        except Exception as e:
+            logging.error(f"Error retrieving brokers: {e}")
+            return []
+
+    
+    def get_available_brokers_per_partition_per_topic(self, topic_name)-> dict:
         """
         Retrieves a dictionary of brokers for each partition of a given topic.
 
@@ -133,11 +156,16 @@ class ExternalClusterManager:
                 broker_path = f"{partition_path}/broker"
                 if self.zkClient.exists(broker_path):
                   data, _ = self.zkClient.get(broker_path)
+                  logging.info("************data of broker************", data)
                   broker_id = data.decode()
                   brokers_per_partition[partition_id].append(broker_id)
                   logging.debug(f"Found broker '{broker_id}' for partition '{partition_path}'")
                 else:
                   logging.warning(f"Broker not found at '{broker_path}'")
+                  length_avaliable_brokers = len(self.zkClient.get_children(broker_path))
+                  print("Available brokers************",length_avaliable_brokers)
+                #   if length_avaliable_brokers:
+                      
             return brokers_per_partition
 
         except Exception as e:
@@ -157,6 +185,7 @@ class ExternalClusterManager:
            partition_path = f"/{os.getenv('REGISTRATION_ZK_PATH', REGISTRATION_ZK_PATH)}/{topic_name}/{partition_id}"
            self.zkClient.ensure_path(partition_path)
            if available_brokers:
+            #   TODO Leader election for partitions in each topic 
               # Assign one broker to this partition
               # we can implement any assignment logic here, for example choosing the first broker available.
               assigned_broker = available_brokers[0]
@@ -204,3 +233,35 @@ class ExternalClusterManager:
       except Exception as e:
           logging.error(f"An error occured during topic retrieval: {e}")
           return []
+      
+    def create_or_update_metadata(self, metadata_path, metadata_data):
+      """
+        Creates or updates the metadata for a topic.
+        Args:
+            metadata_path (str): Path to the metadata ZNode.
+            metadata_data (dict): The metadata to store.
+      """
+      try:
+        metadata_bytes = metadata_data
+        if not self.zkClient.exists(metadata_path):
+            self.zkClient.create(metadata_path, value=metadata_bytes, makepath=True)
+            logging.info(f"Created metadata path '{metadata_path}' with data: {metadata_data}")
+        else:
+            self.zkClient.set(metadata_path, metadata_bytes)
+            logging.info(f"Updated metadata at '{metadata_path}' with data: {metadata_data}")
+      except Exception as e:
+        logging.error(f"Failed to insert or update metadata at '{metadata_path}': {e}")
+        raise e
+      
+    def registerSequentialZNode(self, path, data):
+        try:
+            self.zkClient.ensure_path(os.path.dirname(path))
+            created_path = self.zkClient.create(path, ephemeral=True, sequence=True, value = data.encode())
+            logging.info(f"Created broker with Id: {created_path}")
+            return created_path
+        except:
+            raise Exception(f"Failed to register path: {path} with data: {data}")
+             
+    def registerNode(self, path, hostname):
+        return self.registerSequentialZNode(path = path+  '/broker_', data = hostname)
+    
