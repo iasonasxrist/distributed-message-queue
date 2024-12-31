@@ -102,11 +102,13 @@ class ExternalClusterManager:
             # Create Metadata
             metadata_path = f"{topic_path}/metadata"
             metadata_data = f"partitions: {self.num_partitions}"
-            metadata_bytes = json.dumps(metadata_data).encode() 
-            logging.info("json;loads",json.loads(metadata_bytes.decode()))
+            metadata_bytes = metadata_data.encode() 
+
             self.create_or_update_metadata(metadata_path, metadata_bytes)
 
-            # self.assign_leaders_to_partitions(topic_name)
+            metadata = self.read_metadata(topic_name)
+            logging.info(f"********metadata: {metadata}***********/")
+
             self.assign_brokers_to_partitions(topic_name)
 
             logging.info(f"Successfully created topic '{topic_name}'")
@@ -117,6 +119,23 @@ class ExternalClusterManager:
             return False
 
 
+    def read_metadata(self,topic_name):
+        """
+        Reads the metadata associated with the topic and returns the num of partitions.
+        """
+        topic_path = f"/topics/{topic_name}"
+        try:
+            data, _ = self.zkClient.get(f"{topic_path}/metadata")
+            logging.info(f"********data:{data}*********")
+            if data != 0:
+                metadata_decoded = data.decode("utf-8")
+                number = int(metadata_decoded.split(":")[1].strip())
+                return number
+        
+        except Exception as e:
+           logging.error(f"Error while reading topic metadata from zookeeper {e}")
+           return 0
+        
     def getBrokers(self)-> list:
         """
         Retrieves a list of available brokers
@@ -134,7 +153,6 @@ class ExternalClusterManager:
             logging.error(f"Error retrieving brokers: {e}")
             return []
 
-    
     def get_available_brokers_per_partition_per_topic(self, topic_name)-> dict:
         """
         Retrieves a dictionary of brokers for each partition of a given topic.
