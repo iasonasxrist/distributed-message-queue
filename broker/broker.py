@@ -4,7 +4,7 @@ from flask import Flask, jsonify, request  # type: ignore
 from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
 from collections import defaultdict
 from dotenv import load_dotenv
-
+import time
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,6 +25,7 @@ class Broker:
         self.local_storage = defaultdict(list) #key: partition_id, value: list of messages.
         self.externalClusterManager = ex()
         self.connection = True
+        self.is_leader = defaultdict(bool)  # key: topic/partition, value: true if leader, false otherwise
         logging.info(f"***Broker initializing***")
 
     def start(self):
@@ -39,13 +40,14 @@ class Broker:
 
     def register_broker(self):
         """
-        Registers the broker in ZooKeeper, creating the `/brokers/<broker_id>` path.
+        Registers the broker in ZooKeeper, creating the `/brokers/<broker_id>` path and registers to topics
         """
         broker_path = f"/brokers"
         try:
             registered_path = self.externalClusterManager.registerNode(broker_path, hostname)
             if registered_path:
               self.broker_id = registered_path.split("/")[-1]
+              self.watch_topics()
         except Exception as e:
             logging.error(f"Failed to register broker: {e}")
             raise e
@@ -62,6 +64,62 @@ class Broker:
         except Exception as e:
             logging.error(f"Error while unregistering broker: {e}")
 
+            
+    
+    def watch_topics(self):
+        """
+        Watch for new topics created under the /topics path.
+        """
+        @self.externalClusterManager.zkClient.ChildrenWatch("/topics")
+        def on_topic_change(topics):
+           if topics:
+            for topic in topics:
+                topic_path = f"/topics/{topic}"
+                self.watch_partitions(topic_path)
+                
+    def watch_partitions(self, topic_path):
+        """
+        Watch for new partitions under a specific topic path.
+        """
+        @self.externalClusterManager.zkClient.ChildrenWatch(topic_path)
+        def on_partition_change(children_names):
+            for _, children in enumerate(children_names):
+                if children.startswith("partition"):
+                    partition_path = f"{topic_path}/{children}"
+                    self.register_to_partition(partition_path)
+
+    def register_to_partition(self, partition_path):
+        """
+        Register the broker under a specific partition path.
+        Determine if the broker is MASTER or SLAVE based on election.
+        """
+        try:
+            children = self.externalClusterManager.zkClient.get_children(partition_path)
+            
+            if any (child.startswith(f"{self.broker_id}") for child in children):
+                return
+            
+            broker_node = self.externalClusterManager.zkClient.create(f"{partition_path}/{self.broker_id}",
+                value=bytes(self.broker_id, 'utf-8'),
+                ephemeral=True, sequence=True
+            )
+            logging.info(f"Broker {self.broker_id} registered at {broker_node}")
+
+            # # Check all broker nodes under the partition
+            # children = self.externalClusterManager.zkClient.get_children(partition_path)
+            # sorted_brokers = sorted(children)
+
+            # # Determine role
+            # if broker_node.endswith(sorted_brokers[0]):
+            #     self.is_leader[partition_path] = True
+            #     logging.info(f"Broker {self.broker_id} is MASTER for {partition_path}")
+            # else:
+            #     self.is_leader[partition_path] = False
+            #     logging.info(f"Broker {self.broker_id} is SLAVE for {partition_path}")
+        except Exception as e:
+           logging.error(f"Error on register to partition, {e}")
+           raise e
+    
     def has_partition(self, topic_name, partition_id):
         """
         Checks if the broker has any messages for a given partition.

@@ -101,15 +101,16 @@ class ExternalClusterManager:
 
             # Create Metadata
             metadata_path = f"{topic_path}/metadata"
-            metadata_data = f"partitions: {self.num_partitions}"
-            metadata_bytes = metadata_data.encode() 
+            metadata_data = {"partitions": self.num_partitions}
+            serialized_data = json.dumps(metadata_data)
+
+            metadata_bytes = serialized_data.encode("utf-8") 
 
             self.create_or_update_metadata(metadata_path, metadata_bytes)
+            self.create_partition_folder(topic_path)
 
             metadata = self.read_metadata(topic_name)
-            logging.info(f"********metadata: {metadata}***********/")
-
-            self.assign_brokers_to_partitions(topic_name)
+            logging.info(f"********metadata: {metadata}***********/")           
 
             logging.info(f"Successfully created topic '{topic_name}'")
             return True
@@ -267,10 +268,19 @@ class ExternalClusterManager:
         else:
             self.zkClient.set(metadata_path, metadata_bytes)
             logging.info(f"Updated metadata at '{metadata_path}' with data: {metadata_data}")
+
       except Exception as e:
         logging.error(f"Failed to insert or update metadata at '{metadata_path}': {e}")
         raise e
       
+    def create_partition_folder(self, path):
+        try:
+            for i in range(self.num_partitions):
+                self.zkClient.create(f"{path}/partition{i}")
+        except Exception as e:
+            logging.error(f"Failed to insert or update metadata at '{path}/partition{i}': {e}")
+            raise e
+
     def registerSequentialZNode(self, path, data):
         try:
             self.zkClient.ensure_path(os.path.dirname(path))
