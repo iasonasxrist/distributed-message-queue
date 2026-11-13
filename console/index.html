@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pub-Sub Console</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --fog: #E8EDF2;
+    --surface: #FBFCFD;
+    --ink: #152238;
+    --muted: #5A6A82;
+    --line: #C9D3DF;
+    --leader: #2346D6;
+    --sync: #0E8F86;
+    --lagging: #B86E00;
+    --offline: #BE2450;
+    --track: #DDE4EC;
+    --text: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    --code: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--fog); }
+  body {
+    margin: 0; color: var(--ink); font-family: var(--text); font-size: 15px; line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+  }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 3px solid var(--leader); outline-offset: 2px; }
+
+  .page { max-width: 1320px; margin: 0 auto; padding: 20px 24px 48px; }
+
+  .bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .bar h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+  .bar .spacer { flex: 1; }
+  .pulse { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .pulse i { width: 8px; height: 8px; border-radius: 50%; background: var(--sync); }
+  .pulse.stale i { background: var(--offline); }
+  .pulse.paused i { background: var(--muted); }
+  .quiet {
+    border: 1px solid var(--line); background: var(--surface); border-radius: 6px;
+    padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .quiet:hover { border-color: var(--ink); }
+
+  /* The headline is the cluster's state, said in one sentence. */
+  .state { font-size: clamp(26px, 4vw, 44px); line-height: 1.12; font-weight: 600; letter-spacing: -0.02em;
+    margin: 28px 0 6px; max-width: 22em; text-wrap: balance; }
+  .state.warn { color: var(--lagging); }
+  .state.bad { color: var(--offline); }
+  .substate { color: var(--muted); margin: 0 0 24px; max-width: 70ch; }
+
+  .brokers { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface); overflow: hidden; margin-bottom: 28px; }
+  .broker { padding: 12px 18px; border-right: 1px solid var(--line); min-width: 170px; flex: 1; margin-bottom: -1px; border-bottom: 1px solid var(--line); }
+  .broker:last-child { border-right: 0; }
+  .broker .id { font-family: var(--code); font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .broker .id i { width: 9px; height: 9px; border-radius: 50%; background: var(--sync); flex: none; }
+  .broker.down { background: repeating-linear-gradient(135deg, transparent 0 7px, rgba(190,36,80,.07) 7px 14px); }
+  .broker.down .id { color: var(--offline); }
+  .broker.down .id i { background: transparent; border: 2px solid var(--offline); }
+  .broker .roles { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 28px; align-items: start; }
+  @media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+  .topic { margin-bottom: 30px; }
+  .topic h2 { font-size: 20px; margin: 0 0 2px; font-weight: 600; letter-spacing: -0.01em; }
+  .topic .meta { color: var(--muted); font-size: 13px; margin: 0 0 10px; max-width: 70ch; }
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; }
+  th, td { text-align: left; padding: 0; border-bottom: 1px solid var(--line); vertical-align: stretch; }
+  tr:last-child th, tr:last-child td { border-bottom: 0; }
+  thead th { font-family: var(--code); font-size: 13px; font-weight: 600; padding: 9px 12px; color: var(--ink);
+    border-left: 1px solid var(--line); }
+  thead th:first-child { border-left: 0; font-family: var(--text); color: var(--muted); font-weight: 500; }
+  thead th.down { color: var(--offline); text-decoration: line-through; }
+  tbody th { padding: 10px 12px; width: 132px; font-weight: 500; white-space: nowrap; }
+  tbody th .pid { font-size: 15px; font-weight: 600; }
+  tbody th .pstatus, tbody th .pstored { display: block; font-size: 12px; color: var(--muted); }
+  tbody th.under_replicated .pstatus { color: var(--lagging); }
+  tbody th.offline .pstatus { color: var(--offline); font-weight: 600; }
+  tbody td { border-left: 1px solid var(--line); }
+
+  /* A replica cell: the bar is that broker's copy of the log, drawn against the leader's length. */
+  .replica { display: block; width: 100%; height: 100%; min-height: 58px; padding: 9px 12px; border: 0;
+    background: none; text-align: left; cursor: pointer; }
+  .replica:hover { background: rgba(35,70,214,.05); }
+  .replica .role { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; }
+  .replica .role small { font-weight: 500; color: var(--muted); font-size: 12px; }
+  .replica .log { display: block; height: 10px; border-radius: 2px; background: var(--track); margin-top: 7px; overflow: hidden; }
+  .replica .log span { display: block; height: 100%; min-width: 2px; background: var(--sync); transition: width .4s ease; }
+  .replica.leader .role { color: var(--leader); }
+  .replica.leader .log span { background: var(--leader); }
+  .replica.follower .role { color: var(--sync); }
+  .replica.lagging .role { color: var(--lagging); }
+  .replica.lagging .log span { background: repeating-linear-gradient(90deg, var(--lagging) 0 6px, #E0A64A 6px 9px); }
+  .replica.unknown .log span { background: var(--muted); opacity: .35; }
+  .replica.changed { animation: changed 1.6s ease-out 1; }
+  @keyframes changed { from { box-shadow: inset 0 0 0 3px var(--leader); } to { box-shadow: inset 0 0 0 3px transparent; } }
+  .absent { display: flex; align-items: center; min-height: 58px; padding: 9px 12px; color: var(--muted); font-size: 13px; }
+  .absent.lost { color: var(--offline); }
+
+  .topic-head { display: flex; align-items: flex-end; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 10px; }
+  .topic-head > div:first-child { flex: 1; min-width: 240px; }
+  .topic-head .meta { margin: 0; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .quiet.danger { color: var(--offline); border-color: #E3B4C3; }
+  .quiet.danger:hover { border-color: var(--offline); }
+  .solid { border: 1px solid var(--leader); background: var(--leader); color: #fff; border-radius: 6px; padding: 7px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .solid.danger { border-color: var(--offline); background: var(--offline); }
+  .solid:disabled { opacity: .55; cursor: default; }
+
+  form.sheet { padding: 16px 20px 20px; }
+  form.sheet fieldset { border: 0; padding: 0; margin: 0 0 14px; }
+  form.sheet .choice { display: flex; align-items: center; gap: 10px; padding: 7px 0; flex-wrap: wrap; }
+  form.sheet .choice input[type=radio] { width: 17px; height: 17px; margin: 0; accent-color: var(--leader); }
+  form.sheet input[type=number] { width: 86px; font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+  form.sheet select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+  form.sheet .note { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; max-width: 60ch; }
+  form.sheet .problem { color: var(--offline); font-size: 13.5px; margin: 0 0 12px; }
+  form.sheet .buttons { display: flex; justify-content: flex-end; gap: 10px; }
+
+  .who { color: var(--muted); font-size: 13px; }
+  .who b { color: var(--ink); font-weight: 600; }
+  .notice { margin: 0 0 20px; padding: 10px 14px; border: 1px solid #E6C68F; border-left: 4px solid var(--lagging);
+    border-radius: 6px; background: #FFF8EA; font-size: 14px; max-width: 70ch; }
+  .notice button { border: 0; background: none; padding: 0; color: var(--leader); font-weight: 600; cursor: pointer; text-decoration: underline; }
+  .signin { max-width: 360px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 22px; }
+  .signin label, form.sheet label.field { display: block; font-size: 13px; font-weight: 600; margin-bottom: 14px; }
+  .signin input, form.sheet label.field input { display: block; width: 100%; margin-top: 5px; font: inherit; font-weight: 400;
+    padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+  .signin .problem { color: var(--offline); font-size: 13.5px; margin: 0 0 12px; }
+  .signin .hint { margin: 14px 0 0; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 13px; margin: 0 0 26px; padding: 0; list-style: none; }
+  .legend i { display: inline-block; width: 22px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+
+  .side h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  .feed { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--line); }
+  .feed li { padding: 0 0 12px 14px; position: relative; font-size: 13.5px; }
+  .feed li::before { content: ""; position: absolute; left: -6px; top: 6px; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--muted); }
+  .feed li.good::before { border-color: var(--sync); }
+  .feed li.warn::before { border-color: var(--lagging); }
+  .feed li.bad::before { border-color: var(--offline); background: var(--offline); }
+  .feed time { display: block; color: var(--muted); font-size: 12px; }
+  .feed code, .substate code, .empty code { font-family: var(--code); font-size: .93em; }
+  .hint { color: var(--muted); font-size: 13.5px; }
+
+  .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 22px; background: var(--surface); max-width: 70ch; }
+  .empty pre { font-family: var(--code); font-size: 13px; background: var(--fog); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 10px 0 0; }
+
+  dialog { border: 1px solid var(--line); border-radius: 10px; padding: 0; width: min(720px, calc(100vw - 32px));
+    color: var(--ink); background: var(--surface); box-shadow: 0 24px 60px rgba(21,34,56,.28); }
+  dialog::backdrop { background: rgba(21,34,56,.45); }
+  dialog header { display: flex; align-items: flex-start; gap: 12px; padding: 18px 20px 12px; border-bottom: 1px solid var(--line); }
+  dialog header h3 { margin: 0; font-size: 18px; font-weight: 600; }
+  dialog header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  dialog header .spacer { flex: 1; }
+  .rows { max-height: 56vh; overflow: auto; margin: 0; padding: 0; list-style: none; }
+  .rows li { display: grid; grid-template-columns: 64px 1fr; gap: 12px; padding: 8px 20px; border-bottom: 1px solid var(--fog); font-family: var(--code); font-size: 13px; }
+  .rows li b { color: var(--muted); font-weight: 500; text-align: right; }
+  .rows li span { white-space: pre-wrap; word-break: break-word; }
+  .rows .note { display: block; font-family: var(--text); color: var(--muted); padding: 18px 20px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .replica.changed { animation: none; }
+    .replica .log span { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="bar">
+    <h1>Pub-Sub console</h1>
+    <span class="spacer"></span>
+    <span class="pulse" id="pulse"><i></i><span id="pulse-text">Connecting</span></span>
+    <span class="who" id="who" hidden></span>
+    <button class="quiet" id="change-password" type="button" hidden>Change password</button>
+    <button class="quiet" id="sign-out" type="button" hidden>Sign out</button>
+    <button class="quiet" id="open-settings" type="button" hidden>Retention settings</button>
+    <button class="quiet" id="toggle" type="button">Pause updates</button>
+  </div>
+
+  <p class="state" id="state" aria-live="polite">Reading the cluster</p>
+  <p class="substate" id="substate"></p>
+
+  <form class="signin" id="signin" hidden>
+    <label>Username <input id="signin-user" autocomplete="username" required></label>
+    <label>Password <input id="signin-password" type="password" autocomplete="current-password" required></label>
+    <p class="problem" id="signin-problem" role="alert" hidden></p>
+    <button class="solid" type="submit" id="signin-submit">Sign in</button>
+    <p class="hint">A new installation starts with the user admin and the password admin.</p>
+  </form>
+
+  <div id="content">
+  <p class="notice" id="default-password" hidden>You are still using the default password, which anyone can guess.
+    <button type="button" id="notice-change">Change password</button></p>
+
+  <div class="brokers" id="brokers" aria-label="Brokers"></div>
+
+  <div class="layout">
+    <main>
+      <ul class="legend" aria-label="Legend">
+        <li><i style="background:var(--leader)"></i>Leader, takes the writes</li>
+        <li><i style="background:var(--sync)"></i>Follower in sync</li>
+        <li><i style="background:repeating-linear-gradient(90deg,var(--lagging) 0 6px,#E0A64A 6px 9px)"></i>Follower out of sync</li>
+        <li>Bar length is the replica's log compared with the leader's</li>
+      </ul>
+      <div id="topics"></div>
+    </main>
+    <aside class="side">
+      <h2>What changed</h2>
+      <p class="hint" id="feed-hint">Leader elections, brokers stopping or returning, and replicas falling behind appear here while this page is open.</p>
+      <ol class="feed" id="feed"></ol>
+    </aside>
+  </div>
+  </div>
+</div>
+
+<dialog id="viewer" aria-labelledby="viewer-title">
+  <header>
+    <div>
+      <h3 id="viewer-title"></h3>
+      <p id="viewer-sub"></p>
+    </div>
+    <span class="spacer"></span>
+    <button class="quiet" type="button" id="viewer-close">Close</button>
+  </header>
+  <ol class="rows" id="viewer-rows"></ol>
+</dialog>
+
+<dialog id="sheet" aria-labelledby="sheet-title">
+  <header>
+    <div>
+      <h3 id="sheet-title"></h3>
+      <p id="sheet-sub"></p>
+    </div>
+  </header>
+  <form class="sheet" id="sheet-form" method="dialog"></form>
+</dialog>
+
+<script>
+const POLL_MS = 2000;
+const $ = (id) => document.getElementById(id);
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+const plural = (n, word, many) => `${n} ${n === 1 ? word : (many || word + "s")}`;
+const clock = (d) => d.toLocaleTimeString([], { hour12: false });
+
+let previous = null;      // last snapshot, to work out what changed
+let paused = false;
+let changedCells = new Set();
+const events = [];
+let settings = { read_only: true, retention: { default_hours: 720, topics: {} } };
+
+// ---- sign-in ---------------------------------------------------------------------
+// The token lives in this tab only: closing the tab signs you out.
+let token = null;
+let signedOut = false;
+let user = null;
+try { token = sessionStorage.getItem("pubsub-token"); } catch (error) { /* storage blocked: sign in each visit */ }
+
+function setToken(value) {
+  token = value;
+  try {
+    if (value) sessionStorage.setItem("pubsub-token", value); else sessionStorage.removeItem("pubsub-token");
+  } catch (error) { /* keep it in memory only */ }
+}
+const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
+
+function showSignIn(message) {
+  signedOut = true;
+  user = null;
+  previous = null;
+  setToken(null);
+  $("content").hidden = true;
+  $("signin").hidden = false;
+  for (const id of ["who", "change-password", "sign-out", "open-settings", "toggle"]) $(id).hidden = true;
+  $("state").className = "state";
+  $("state").textContent = "Sign in to the console";
+  $("substate").textContent = message || "";
+  setPulse("paused", "Signed out");
+  $("signin-user").focus();
+}
+
+// 720 -> "30 days", 36 -> "36 hours", 0 -> "forever"
+function describeHours(hours) {
+  if (!hours) return "forever";
+  if (hours % 24 === 0) return plural(hours / 24, "day");
+  return plural(Math.round(hours * 100) / 100, "hour");
+}
+const keptFor = (hours) => (hours ? `for ${describeHours(hours)}` : "forever");
+const ACKS_TEXT = {
+  all: "Writes are confirmed once every follower has them.",
+  majority: "Writes are confirmed once a majority of the replicas have them.",
+  leader: "Writes are confirmed once the leader has them.",
+};
+
+// ---- what changed between two snapshots --------------------------------------
+function describeChanges(before, after) {
+  const out = [];
+  const add = (level, ...parts) => out.push({ level, parts });
+  const code = (text) => ({ code: text });
+
+  const was = new Map(before.brokers.map((b) => [b.id, b.alive]));
+  for (const b of after.brokers) {
+    if (!was.has(b.id) && b.alive) add("good", "Broker ", code(b.id), " joined");
+    else if (was.get(b.id) && !b.alive) add("bad", "Broker ", code(b.id), " stopped");
+    else if (was.has(b.id) && !was.get(b.id) && b.alive) add("good", "Broker ", code(b.id), " is back");
+  }
+
+  const oldTopics = new Map(before.topics.map((t) => [t.name, t]));
+  const newTopics = new Map(after.topics.map((t) => [t.name, t]));
+  for (const name of oldTopics.keys()) if (!newTopics.has(name)) add("warn", "Topic ", code(name), " was deleted");
+  for (const [name, topic] of newTopics) {
+    const old = oldTopics.get(name);
+    if (!old) { add("good", "Topic ", code(name), ` created with ${plural(topic.partitions.length, "partition")}`); continue; }
+    const oldParts = new Map(old.partitions.map((p) => [p.id, p]));
+    for (const p of topic.partitions) {
+      const o = oldParts.get(p.id);
+      if (!o) continue;
+      const where = `${name}/${p.id}`;
+      if (o.start_offset !== null && p.start_offset !== null && p.start_offset > o.start_offset) {
+        add("warn", `${plural(p.start_offset - o.start_offset, "message")} purged from `, code(where));
+      }
+      if (o.leader !== p.leader) {
+        if (p.leader === null) add("bad", code(where), " is offline: no in-sync replica left");
+        else if (o.leader === null) add("good", code(where), " is back online, led by ", code(p.leader));
+        else add("warn", code(where), " leader moved from ", code(o.leader), " to ", code(p.leader));
+        if (p.leader) changedCells.add(`${where}@${p.leader}`);
+      }
+      const oldSync = new Map(o.replicas.map((r) => [r.broker, r.in_sync]));
+      for (const r of p.replicas) {
+        if (r.role !== "follower" || !oldSync.has(r.broker)) {
+          if (r.role === "follower" && !oldSync.has(r.broker)) {
+            add("good", code(r.broker), " rejoined ", code(where), " as a follower");
+            changedCells.add(`${where}@${r.broker}`);
+          }
+          continue;
+        }
+        if (oldSync.get(r.broker) && !r.in_sync) { add("warn", code(r.broker), " fell out of sync on ", code(where)); changedCells.add(`${where}@${r.broker}`); }
+        if (!oldSync.get(r.broker) && r.in_sync && o.leader === p.leader) { add("good", code(r.broker), " caught up on ", code(where)); changedCells.add(`${where}@${r.broker}`); }
+      }
+      const now = new Set(p.replicas.map((r) => r.broker));
+      for (const r of o.replicas) {
+        if (!now.has(r.broker) && r.broker !== o.leader) add("warn", code(r.broker), " was removed from ", code(where));
+      }
+    }
+  }
+  return out;
+}
+
+// ---- rendering ----------------------------------------------------------------
+function renderState(snap) {
+  const s = snap.summary;
+  const state = $("state");
+  state.className = "state";
+  let text;
+  if (s.brokers_alive === 0) { text = "No brokers are running."; state.classList.add("bad"); }
+  else if (s.partitions === 0) text = `${plural(s.brokers_alive, "broker")} running, no topics yet.`;
+  else if (s.offline > 0) {
+    text = `${plural(s.offline, "partition")} ${s.offline === 1 ? "is" : "are"} offline and cannot take writes.`;
+    state.classList.add("bad");
+  } else if (s.under_replicated > 0) {
+    text = `${plural(s.under_replicated, "partition")} ${s.under_replicated === 1 ? "is" : "are"} short of replicas.`;
+    state.classList.add("warn");
+  } else text = `All ${plural(s.partitions, "partition")} have a leader and every replica in sync.`;
+  state.textContent = text;
+
+  const down = s.brokers_known - s.brokers_alive;
+  const bits = [`${s.brokers_alive} of ${plural(s.brokers_known, "broker")} running`, plural(s.topics, "topic"), plural(s.partitions, "partition")];
+  let sub = bits.join(", ") + ".";
+  if (down > 0 && s.partitions > 0) sub += ` ${plural(down, "broker")} that held replicas ${down === 1 ? "is" : "are"} not running.`;
+  if (snap.recovering.length) sub += ` Recovery in progress for ${snap.recovering.join(", ")}.`;
+  $("substate").textContent = sub;
+}
+
+function renderBrokers(snap) {
+  const box = $("brokers");
+  box.replaceChildren(...snap.brokers.map((b) =>
+    h("div", { class: "broker" + (b.alive ? "" : " down") },
+      h("div", { class: "id" }, h("i"), b.id),
+      h("div", { class: "roles" }, b.alive
+        ? `Leads ${b.leader_of}, follows ${b.follower_of}`
+        : "Not running"))));
+  box.hidden = snap.brokers.length === 0;
+}
+
+function replicaCell(topic, partition, broker, brokerAlive) {
+  const replica = partition.replicas.find((r) => r.broker === broker);
+  if (!replica) {
+    const assigned = partition.assigned.includes(broker);
+    if (assigned) return h("div", { class: "absent lost" }, brokerAlive ? "Replica not rejoined" : "Replica lost");
+    return h("div", { class: "absent" }, "No replica");
+  }
+  const leaderEnd = partition.end_offset;
+  const end = replica.end_offset;
+  const kind = replica.role === "leader" ? "leader" : (replica.in_sync ? "follower" : "lagging");
+  const unknown = end === null || end === undefined;
+  const width = unknown ? 100 : (leaderEnd ? Math.min(100, (end / leaderEnd) * 100) : (end > 0 ? 100 : 0));
+  const label = replica.role === "leader" ? "Leader" : (replica.in_sync ? "Follower" : "Out of sync");
+  let detail = unknown ? "no answer" : `${end - (replica.start_offset || 0)} msg`;
+  if (replica.lag) detail += `, ${replica.lag} behind`;
+  const key = `${topic.name}/${partition.id}@${broker}`;
+  return h("button", {
+      class: `replica ${kind}${unknown ? " unknown" : ""}${changedCells.has(key) ? " changed" : ""}`,
+      type: "button",
+      "aria-label": `${label} on ${broker}, ${detail}. Show messages`,
+      onclick: () => openViewer(topic.name, partition.id, broker, label),
+    },
+    h("span", { class: "role" }, label, h("small", {}, detail)),
+    h("span", { class: "log" }, h("span", { style: `width:${width}%` })));
+}
+
+const STATUS_TEXT = { healthy: "In sync", under_replicated: "Short of replicas", offline: "Offline" };
+
+function renderTopics(snap) {
+  const box = $("topics");
+  if (!snap.topics.length) {
+    box.replaceChildren(h("div", { class: "empty" },
+      h("strong", {}, "No topics yet."), " Create one through the producer and it appears here within two seconds.",
+      h("pre", {}, "curl -X POST http://localhost:4000/create_topic/news/3")));
+    return;
+  }
+  const brokers = snap.brokers;
+  box.replaceChildren(...snap.topics.map((topic) => {
+    const head = h("tr", {}, h("th", { scope: "col" }, "Partition"),
+      brokers.map((b) => h("th", { scope: "col", class: b.alive ? "" : "down", title: b.alive ? "" : "Not running" }, b.id)));
+    const rows = topic.partitions.map((p) =>
+      h("tr", {},
+        h("th", { scope: "row", class: p.status },
+          h("span", { class: "pid" }, `${topic.name}/${p.id}`),
+          h("span", { class: "pstatus" }, `${STATUS_TEXT[p.status]}, ${p.in_sync_count} of ${p.replica_target}`),
+          p.start_offset > 0 && h("span", { class: "pstored" }, `${p.stored} stored, from offset ${p.start_offset}`)),
+        brokers.map((b) => h("td", {}, replicaCell(topic, p, b.id, b.alive)))));
+    const stored = topic.partitions.reduce((n, p) => n + (p.stored || 0), 0);
+    const kept = `Messages are kept ${keptFor(topic.retention_hours)}${topic.retention_is_default ? " (cluster default)" : ""}.`;
+    return h("section", { class: "topic" },
+      h("div", { class: "topic-head" },
+        h("div", {},
+          h("h2", {}, topic.name),
+          h("p", { class: "meta" }, `${plural(topic.partitions.length, "partition")}, ${plural(stored, "message")} stored. ${kept} ${ACKS_TEXT[topic.acks] || ""}`)),
+        !settings.read_only && h("div", { class: "actions" },
+          h("button", { class: "quiet", type: "button", onclick: () => openTopicRetention(topic) }, "Topic settings"),
+          h("button", { class: "quiet danger", type: "button", onclick: () => openPurge(topic) }, "Purge messages"))),
+      h("div", { class: "scroll" }, h("table", {}, h("thead", {}, head), h("tbody", {}, rows))));
+  }));
+}
+
+function renderFeed() {
+  $("feed-hint").hidden = events.length > 0;
+  $("feed").replaceChildren(...events.map((e) =>
+    h("li", { class: e.level }, h("time", {}, clock(e.at)),
+      e.parts.map((part) => (part.code ? h("code", {}, part.code) : part)))));
+}
+
+function render(snap) {
+  if (previous) {
+    changedCells = new Set();
+    const now = new Date();
+    for (const change of describeChanges(previous, snap).reverse()) events.unshift({ ...change, at: now });
+    events.length = Math.min(events.length, 60);
+  }
+  settings = snap.settings || settings;
+  user = snap.user || null;
+  $("open-settings").hidden = settings.read_only;
+  $("who").hidden = $("change-password").hidden = $("sign-out").hidden = !user;
+  if (user) $("who").replaceChildren("Signed in as ", h("b", {}, user.username));
+  $("default-password").hidden = !(user && user.must_change_password);
+  renderState(snap);
+  renderBrokers(snap);
+  renderTopics(snap);
+  renderFeed();
+  previous = snap;
+}
+
+// ---- polling ------------------------------------------------------------------
+function setPulse(kind, text) {
+  $("pulse").className = "pulse" + (kind ? " " + kind : "");
+  $("pulse-text").textContent = text;
+}
+
+async function refresh() {
+  if (paused || signedOut) return;
+  try {
+    const response = await fetch("api/cluster", { cache: "no-store", headers: authHeaders() });
+    if (response.status === 401) { showSignIn(token ? "Your sign-in has ended. Sign in again to continue." : ""); return; }
+    if (!response.ok) throw new Error((await response.json()).detail || `HTTP ${response.status}`);
+    render(await response.json());
+    setPulse("", `Live, updated ${clock(new Date())}`);
+  } catch (error) {
+    setPulse("stale", "Cannot read the cluster, retrying");
+    if (!previous) {
+      $("state").className = "state bad";
+      $("state").textContent = "The console cannot read the cluster.";
+      $("substate").textContent = `${error.message}. Check that ZooKeeper is running, then this page recovers by itself.`;
+    }
+  }
+}
+
+$("toggle").addEventListener("click", () => {
+  paused = !paused;
+  $("toggle").textContent = paused ? "Resume updates" : "Pause updates";
+  if (paused) setPulse("paused", "Paused"); else refresh();
+});
+
+// ---- message viewer -----------------------------------------------------------
+async function openViewer(topic, partition, broker, label) {
+  $("viewer-title").textContent = `${topic}/${partition} on ${broker}`;
+  $("viewer-sub").textContent = `${label}. Loading the latest messages.`;
+  $("viewer-rows").replaceChildren();
+  $("viewer").showModal();
+  try {
+    const response = await fetch(`api/messages/${encodeURIComponent(topic)}/${partition}?broker=${encodeURIComponent(broker)}&limit=50`, { cache: "no-store", headers: authHeaders() });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+    $("viewer-sub").textContent = body.messages.length
+      ? `${label}. Showing the last ${body.messages.length} of ${plural(body.end_offset, "message")}, newest first.`
+      : `${label}. This replica has no messages yet.`;
+    $("viewer-rows").replaceChildren(...(body.messages.length
+      ? body.messages.slice().reverse().map((m) => h("li", {}, h("b", {}, m.offset), h("span", {}, JSON.stringify(m.value))))
+      : [h("li", { class: "note" }, "Publish a message through the producer and open this replica again.")]));
+  } catch (error) {
+    $("viewer-sub").textContent = `${label}. The messages could not be loaded.`;
+    $("viewer-rows").replaceChildren(h("li", { class: "note" }, `${error.message}.`));
+  }
+}
+$("viewer-close").addEventListener("click", () => $("viewer").close());
+$("viewer").addEventListener("click", (event) => { if (event.target === $("viewer")) $("viewer").close(); });
+
+// ---- retention settings and purge ---------------------------------------------
+async function send(method, url, body) {
+  const response = await fetch(url, { method, headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  const result = await response.json().catch(() => ({}));
+  if (response.status === 401 && !url.startsWith("api/login")) showSignIn("Your sign-in has ended. Sign in again to continue.");
+  if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : `HTTP ${response.status}`);
+  return result;
+}
+
+function note(level, ...parts) {
+  events.unshift({ level, parts, at: new Date() });
+  renderFeed();
+}
+
+// A number and a unit, e.g. [30] [days]. Returns {row, hours()}.
+function durationField(hours) {
+  const inDays = !hours || hours % 24 === 0;
+  const amount = h("input", { type: "number", min: "0", step: "any", value: hours ? (inDays ? hours / 24 : hours) : 30, "aria-label": "Amount" });
+  const unit = h("select", { "aria-label": "Unit" }, h("option", { value: "24" }, "days"), h("option", { value: "1" }, "hours"));
+  unit.value = inDays ? "24" : "1";
+  return { amount, unit, hours: () => Number(amount.value) * Number(unit.value) };
+}
+
+function radio(name, value, checked) {
+  return h("input", { type: "radio", name, value, checked: checked ? "" : null });
+}
+
+function openSheet({ title, sub, fields, submitLabel, danger, submit }) {
+  $("sheet-title").textContent = title;
+  $("sheet-sub").textContent = sub;
+  const problem = h("p", { class: "problem", role: "alert", hidden: "" });
+  const save = h("button", { class: "solid" + (danger ? " danger" : ""), type: "submit" }, submitLabel);
+  const form = $("sheet-form");
+  form.replaceChildren(...fields, problem,
+    h("div", { class: "buttons" },
+      h("button", { class: "quiet", type: "button", onclick: () => $("sheet").close() }, "Cancel"), save));
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    problem.hidden = true;
+    try {
+      await submit(new FormData(form).get("mode"));
+      $("sheet").close();
+      refresh();
+    } catch (error) {
+      problem.textContent = `Not saved: ${error.message}.`;
+      problem.hidden = false;
+      save.disabled = false;
+    }
+  };
+  $("sheet").showModal();
+}
+
+function openDefaultRetention() {
+  const current = settings.retention.default_hours;
+  const field = durationField(current);
+  openSheet({
+    title: "Retention settings",
+    sub: "How long topics keep messages unless a topic has its own setting.",
+    fields: [h("fieldset", {},
+      h("label", { class: "choice" }, radio("mode", "custom", current > 0), "Keep messages for", field.amount, field.unit),
+      h("label", { class: "choice" }, radio("mode", "forever", !current), "Keep messages forever")),
+      h("p", { class: "note" }, "Brokers delete whole segment files once every message in them is older than this. The change applies to all brokers within moments.")],
+    submitLabel: "Save retention",
+    submit: async (mode) => {
+      const hours = mode === "forever" ? 0 : field.hours();
+      await send("PUT", "api/settings/retention", { default_hours: hours });
+      note("good", `Default retention set to ${describeHours(hours)}`);
+    },
+  });
+}
+
+function openTopicRetention(topic) {
+  const own = !topic.retention_is_default;
+  const field = durationField(own ? topic.retention_hours : settings.retention.default_hours);
+  const acks = h("select", { "aria-label": "Confirm a write when" },
+    h("option", { value: "all" }, "every follower has it (safest)"),
+    h("option", { value: "majority" }, "a majority of the replicas have it"),
+    h("option", { value: "leader" }, "the leader has it (fastest)"));
+  acks.value = topic.acks;
+  openSheet({
+    title: `Settings for ${topic.name}`,
+    sub: `Messages are currently kept ${keptFor(topic.retention_hours)}.`,
+    fields: [h("fieldset", {},
+      h("label", { class: "choice" }, radio("mode", "default", !own), `Use the cluster default (${describeHours(settings.retention.default_hours)})`),
+      h("label", { class: "choice" }, radio("mode", "custom", own && topic.retention_hours > 0), "Keep messages for", field.amount, field.unit),
+      h("label", { class: "choice" }, radio("mode", "forever", own && !topic.retention_hours), "Keep messages forever")),
+      h("fieldset", {}, h("label", { class: "choice" }, "Confirm a write when", acks)),
+      h("p", { class: "note" }, "Waiting for every follower is the safest. A majority still survives the loss of one broker. With the leader only, a message can be lost if the leader fails right after confirming it.")],
+    submitLabel: "Save settings",
+    submit: async (mode) => {
+      const hours = mode === "default" ? null : (mode === "forever" ? 0 : field.hours());
+      const name = encodeURIComponent(topic.name);
+      await send("PUT", `api/settings/retention/${name}`, { hours });
+      note("good", "Retention for ", { code: topic.name }, hours === null ? " set to the cluster default" : ` set to ${describeHours(hours)}`);
+      if (acks.value !== topic.acks) {
+        await send("PUT", `api/settings/acks/${name}`, { acks: acks.value });
+        note("warn", "Writes to ", { code: topic.name }, ` are now confirmed by: ${acks.value}`);
+      }
+    },
+  });
+}
+
+function openPurge(topic) {
+  const field = durationField(24 * 7);
+  openSheet({
+    title: `Purge messages from ${topic.name}`,
+    sub: "Deletes messages on every broker now. This cannot be undone.",
+    fields: [h("fieldset", {},
+      h("label", { class: "choice" }, radio("mode", "older", true), "Messages older than", field.amount, field.unit),
+      h("label", { class: "choice" }, radio("mode", "all", false), "Everything stored so far")),
+      h("p", { class: "note" }, "Subscribers that have not read the purged messages continue with what is left. When purging by age, messages sharing a segment file with newer ones stay until the whole file is old enough.")],
+    submitLabel: "Purge messages",
+    danger: true,
+    submit: async (mode) => {
+      const hours = mode === "all" ? 0 : field.hours();
+      await send("POST", `api/purge/${encodeURIComponent(topic.name)}`, { older_than_hours: hours });
+      note("warn", "Purge requested for ", { code: topic.name }, hours ? `: messages older than ${describeHours(hours)}` : ": everything stored so far");
+    },
+  });
+}
+
+function passwordField(label, autocomplete) {
+  const input = h("input", { type: "password", autocomplete, required: "" });
+  return { input, row: h("label", { class: "field" }, label, input) };
+}
+
+function openChangePassword(firstSignIn) {
+  const current = passwordField("Current password", "current-password");
+  const fresh = passwordField("New password (at least 8 characters)", "new-password");
+  const again = passwordField("New password again", "new-password");
+  openSheet({
+    title: "Change password",
+    sub: firstSignIn
+      ? "You signed in with the default password. Choose your own before going further."
+      : `For ${user ? user.username : "your account"}. Other sign-ins with the old password end.`,
+    fields: [current.row, fresh.row, again.row],
+    submitLabel: "Change password",
+    submit: async () => {
+      if (fresh.input.value !== again.input.value) throw new Error("The two new passwords are different");
+      const result = await send("POST", "api/change_password", { current_password: current.input.value, new_password: fresh.input.value });
+      setToken(result.token);
+      note("good", "Password changed");
+    },
+  });
+  current.input.focus();
+}
+
+$("signin").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const problem = $("signin-problem");
+  problem.hidden = true;
+  $("signin-submit").disabled = true;
+  try {
+    const result = await send("POST", "api/login", { username: $("signin-user").value, password: $("signin-password").value });
+    setToken(result.token);
+    signedOut = false;
+    $("signin").hidden = true;
+    $("content").hidden = false;
+    $("toggle").hidden = false;
+    $("signin-password").value = "";
+    $("state").textContent = "Reading the cluster";
+    $("substate").textContent = "";
+    user = { username: result.username, role: result.role, must_change_password: result.must_change_password };
+    await refresh();
+    if (result.must_change_password) openChangePassword(true);
+  } catch (error) {
+    problem.textContent = `${error.message}.`;
+    problem.hidden = false;
+  } finally {
+    $("signin-submit").disabled = false;
+  }
+});
+$("sign-out").addEventListener("click", () => showSignIn("You signed out."));
+$("change-password").addEventListener("click", () => openChangePassword(false));
+$("notice-change").addEventListener("click", () => openChangePassword(false));
+$("open-settings").addEventListener("click", openDefaultRetention);
+$("sheet").addEventListener("click", (event) => { if (event.target === $("sheet")) $("sheet").close(); });
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

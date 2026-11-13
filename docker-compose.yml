@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: zookeeper
+    container_name: zookeeper
+    ports:
+      - "127.0.0.1:2181:2181"   # this machine only: ZooKeeper has no login
+    restart: always
+    networks:
+      - pubsub_net
+
+
+  broker:
+    # ./broker is the Python broker, ./broker-go the same broker in Go (see .env)
+    build: ${BROKER_BUILD:-./broker}
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    deploy:
+      replicas: 3
+    ports:
+      - "5000" 
+    depends_on:
+      - zookeeper
+    networks:
+      - pubsub_net
+      
+  auth:
+    build: ./auth
+    container_name: auth
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    depends_on:
+      - zookeeper
+    ports:
+      - "127.0.0.1::7000"
+    networks:
+      - pubsub_net
+
+  producer:
+    build: ./producer
+    container_name: producer
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    depends_on:
+      - zookeeper
+      - broker
+    ports:
+      - "${PRODUCER_PORT:-4000}:5000"
+    networks:
+      - pubsub_net
+
+  # The same producer written in Go. Off by default: start it with
+  # COMPOSE_PROFILES=go (see .env) or `docker compose --profile go up`.
+  producer-go:
+    build: ./producer-go
+    container_name: producer-go
+    profiles: ["go"]
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    depends_on:
+      - zookeeper
+      - broker
+      - auth
+    ports:
+      - "${PRODUCER_GO_PORT:-4001}:5000"
+    networks:
+      - pubsub_net
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "127.0.0.1:6379:6379"   # this machine only: Redis has no login
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    networks:
+      - pubsub_net
+
+
+  consumer:
+    build: ./consumer
+    container_name: consumer
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    depends_on:
+      - zookeeper
+      - broker
+      - redis
+    ports:
+      - "127.0.0.1::5000"
+    networks:
+      - pubsub_net
+
+
+  console:
+    build: ./console
+    container_name: console
+    env_file: settings.env
+    environment:
+      - ZOOKEEPER_HOST=zookeeper:2181
+    depends_on:
+      - zookeeper
+      - broker
+    ports:
+      - "8080:8080"
+    networks:
+      - pubsub_net
+
+networks:
+  pubsub_net:
+    driver: bridge
