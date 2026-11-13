@@ -9,6 +9,7 @@ import asyncio
 import os
 import json
 import hashlib
+import threading
 import time
 from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError
@@ -79,9 +80,38 @@ async def wait(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-def topic_metadata(topic_ID: str) -> dict:
+# Topic metadata is kept in memory and refreshed by a ZooKeeper watch, so a
+# write does not have to ask ZooKeeper who the leader is every time.
+_topics = {}
+_watched_topics = set()
+_topics_lock = threading.Lock()
+
+
+def topic_metadata(topic_ID: str, refresh: bool = False) -> dict:
+    """Metadata of a topic. Raises NoNodeError if the topic does not exist."""
+    if not refresh and zk.connected:      # never trust the copy while cut off from ZooKeeper
+        cached = _topics.get(topic_ID)
+        if cached is not None:
+            return cached
     data, _ = zk.get(f"/topics/{topic_ID}")
-    return json.loads(data.decode("utf-8"))
+    metadata = json.loads(data.decode("utf-8"))
+    _topics[topic_ID] = metadata
+    with _topics_lock:
+        first_time = topic_ID not in _watched_topics
+        _watched_topics.add(topic_ID)
+    if first_time:
+
+        def on_change(data, stat, event=None):
+            if data is None:              # topic deleted: forget it and stop watching
+                _topics.pop(topic_ID, None)
+                with _topics_lock:
+                    _watched_topics.discard(topic_ID)
+                return False
+            _topics[topic_ID] = json.loads(data.decode("utf-8"))
+
+        zk.DataWatch(f"/topics/{topic_ID}")(on_change)
+    return metadata
+
 
 
 # --- Sign-in -----------------------------------------------------------------
@@ -168,11 +198,17 @@ async def write_message(topic_ID: str, message: dict):
     # RETRY_SECONDS, so the caller sees one slower write instead of an error.
     deadline = time.monotonic() + RETRY_SECONDS
     delay = 0.1
+    attempt = 0
     while True:
+        # Topic metadata comes from memory; after a failed attempt it is read from
+        # ZooKeeper again, because the leader may have changed.
         try:
-            metadata = await run_in_threadpool(topic_metadata, topic_ID)
+            metadata = _topics.get(topic_ID) if attempt == 0 and zk.connected else None   # usually in memory
+            if metadata is None:
+                metadata = await run_in_threadpool(topic_metadata, topic_ID, attempt > 0)
         except NoNodeError:
             raise HTTPException(status_code=404, detail="Topic not found")
+        attempt += 1
         partitions = list(metadata["partitions"].keys())
 
         # str() so numeric keys work and hash like the same key in the consumer's URL

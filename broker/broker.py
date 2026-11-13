@@ -315,9 +315,37 @@ def update_topic_metadata(topic_ID: str, mutate, retries: int = 20):
     raise KazooException(f"Could not update metadata for {topic_ID} after {retries} attempts")
 
 
-def topic_metadata(topic_ID: str) -> dict:
+# Topic metadata is kept in memory and refreshed by a ZooKeeper watch, so a
+# write does not have to ask ZooKeeper who the leader is every time.
+_topics = {}
+_watched_topics = set()
+_topics_lock = threading.Lock()
+
+
+def topic_metadata(topic_ID: str, refresh: bool = False) -> dict:
+    """Metadata of a topic. Raises NoNodeError if the topic does not exist."""
+    if not refresh and zk.connected:      # never trust the copy while cut off from ZooKeeper
+        cached = _topics.get(topic_ID)
+        if cached is not None:
+            return cached
     data, _ = zk.get(f"/topics/{topic_ID}")
-    return json.loads(data.decode("utf-8"))
+    metadata = json.loads(data.decode("utf-8"))
+    _topics[topic_ID] = metadata
+    with _topics_lock:
+        first_time = topic_ID not in _watched_topics
+        _watched_topics.add(topic_ID)
+    if first_time:
+
+        def on_change(data, stat, event=None):
+            if data is None:              # topic deleted: forget it and stop watching
+                _topics.pop(topic_ID, None)
+                with _topics_lock:
+                    _watched_topics.discard(topic_ID)
+                return False
+            _topics[topic_ID] = json.loads(data.decode("utf-8"))
+
+        zk.DataWatch(f"/topics/{topic_ID}")(on_change)
+    return metadata
 
 
 def acquire_lock_with_retries(zk: KazooClient, lock_path: str, retries: int = 5, timeout: int = 5):
@@ -839,7 +867,9 @@ async def write_message(topic_ID: str, partition_ID: int, background: Background
 
     # Validate everything before touching the log, so a rejected write leaves no trace
     try:
-        metadata = await run_in_threadpool(topic_metadata, topic_ID)
+        metadata = _topics.get(topic_ID) if zk.connected else None   # usually in memory
+        if metadata is None:
+            metadata = await run_in_threadpool(topic_metadata, topic_ID)
     except NoNodeError:
         raise HTTPException(status_code=404, detail="Topic not found")
     except KazooException as e:
