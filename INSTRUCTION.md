@@ -122,7 +122,7 @@ process handles other writes instead of parking a thread. Calls go through
 talks to ZooKeeper or reads files in bulk stays ordinary blocking code and is
 run on a worker thread when the write path needs it.
 
-A read (`GET http://localhost:5000/read/<email>/news/<key>`):
+A read (`GET /read/<email>/news/<key>` on the consumer):
 
 1. **Consumer** checks the subscription, hashes the key to a partition, and looks up the subscriber's offset in Redis.
 2. It asks an in-sync follower for everything from that offset. If that broker does not answer it tries the next one, and the leader last.
@@ -235,8 +235,9 @@ messages continue from the old offsets.
 **Read as a subscriber** and see that nothing was lost:
 
 ```bash
-curl -u admin:admin -X POST http://localhost:5000/subscribe/me@example.com/orders
-curl -u admin:admin http://localhost:5000/read/me@example.com/orders/user-1
+CONSUMER_URL="http://$(docker compose port consumer 5000)"
+curl -u admin:admin -X POST "$CONSUMER_URL/subscribe/me@example.com/orders"
+curl -u admin:admin "$CONSUMER_URL/read/me@example.com/orders/user-1"
 ```
 
 ## 10. Working on the code

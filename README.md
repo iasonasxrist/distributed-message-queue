@@ -55,10 +55,10 @@ flowchart LR
 | Service | Role | Port |
 |---|---|---|
 | **Producer** | Public write API. Picks the partition from the key and forwards to its leader. Written in Python; a Go version can run beside it. | 4000 (Go: 4001) |
-| **Consumer** | Public read API. Tracks each subscriber's position in Redis. | 5000 |
+| **Consumer** | Public read API. Tracks each subscriber's position in Redis. | Assigned by Docker |
 | **Broker** (x3) | Stores partition logs on disk, replicates to followers, handles failover. Written in Python; a Go version can replace it. | internal |
 | **Console** | Web view of the cluster, plus retention settings and purge. | 8080 |
-| **Auth** | Users, passwords and sign-in tokens. The other services ask it who a request belongs to. | 7000 |
+| **Auth** | Users, passwords and sign-in tokens. The other services ask it who a request belongs to. | Assigned by Docker |
 | **ZooKeeper** | Source of truth for which brokers are alive and who leads each partition. | 2181 |
 | **Redis** | Subscriber offsets. | 6379 |
 
@@ -98,14 +98,17 @@ docker compose up --build -d
 
 Then open the console at **http://localhost:8080** and sign in with **admin** /
 **admin**. The console asks you to choose your own password straight away; use
-that password instead of `admin` in the commands below.
+that password instead of `admin` in the commands below. Docker assigns free
+loopback ports to the consumer and auth service. Check their current addresses
+with `docker compose port consumer 5000` and `docker compose port auth 7000`.
 
 ```bash
 # 1. Create a topic with 3 partitions
 curl -u admin:admin -X POST http://localhost:4000/create_topic/news/3
 
 # 2. Subscribe
-curl -u admin:admin -X POST http://localhost:5000/subscribe/john@example.com/news
+CONSUMER_URL="http://$(docker compose port consumer 5000)"
+curl -u admin:admin -X POST "$CONSUMER_URL/subscribe/john@example.com/news"
 
 # 3. Publish two messages with the same key
 curl -u admin:admin -X POST http://localhost:4000/write/news \
@@ -116,8 +119,8 @@ curl -u admin:admin -X POST http://localhost:4000/write/news \
      -d '{"key": "user123", "value": "second"}'
 
 # 4. Read: returns both messages, then nothing new on the next call
-curl -u admin:admin http://localhost:5000/read/john@example.com/news/user123
-curl -u admin:admin http://localhost:5000/read/john@example.com/news/user123
+curl -u admin:admin "$CONSUMER_URL/read/john@example.com/news/user123"
+curl -u admin:admin "$CONSUMER_URL/read/john@example.com/news/user123"
 ```
 
 To watch a failover, copy a broker id from the console and stop it:
@@ -142,12 +145,13 @@ Every request to the producer, the consumer and the console's API needs a user.
 
 ```bash
 # change the default password
-curl -u admin:admin -X POST http://localhost:7000/change_password \
+AUTH_URL="http://$(docker compose port auth 7000)"
+curl -u admin:admin -X POST "$AUTH_URL/change_password" \
      -H "Content-Type: application/json" \
      -d '{"current_password": "admin", "new_password": "something-long"}'
 
 # add a user who can publish and read
-curl -u admin:something-long -X POST http://localhost:7000/users \
+curl -u admin:something-long -X POST "$AUTH_URL/users" \
      -H "Content-Type: application/json" \
      -d '{"username": "ada", "password": "her-own-password", "role": "user"}'
 ```
@@ -161,7 +165,7 @@ the network in clear text; see the roadmap.
 
 ## API
 
-### Auth (port 7000)
+### Auth (container port 7000)
 
 | Method and path | Who | Description |
 |---|---|---|
@@ -181,7 +185,7 @@ the network in clear text; see the roadmap.
 | `POST /write/{topic}` | Publish a JSON message. It must contain a `key`; everything else is stored as is. |
 | `DELETE /delete_topic/{topic}` | Remove a topic's metadata (admin). |
 
-### Consumer (port 5000)
+### Consumer (container port 5000)
 
 | Method and path | Description |
 |---|---|
@@ -288,8 +292,8 @@ messages stored inside the old broker containers are not carried over.
 Compare them on the same cluster:
 
 ```bash
-python stress/stress_test.py --skip-fault --producer http://localhost:4000   # Python producer
-python stress/stress_test.py --skip-fault --producer http://localhost:4001   # Go producer
+python stress/stress_test.py --skip-fault --out python-producer.json
+python stress/stress_test.py --skip-fault --producer-service producer-go --out go-producer.json
 ```
 
 One run of each combination on the same 2-core machine (3 brokers, 3 partitions, sign-in on, `acks=all`):
@@ -373,9 +377,13 @@ docker compose up --build -d
 pip install requests
 python stress/stress_test.py                 # all three phases
 python stress/stress_test.py --skip-fault    # load only, nothing is killed
-python stress/stress_test.py --user admin --password <yours>
 python stress/stress_test.py --skip-load --scenarios all   # leader/follower, crash/planned stop
 ```
+
+For a local Compose cluster, the script discovers the published ports and gets a
+sign-in token through the running auth container using your local Docker access.
+For another deployment, pass the service URLs with `--producer`, `--consumer`
+and `--console`, and credentials with `--user` and `--password`.
 
 Reference results from one run: 3 brokers, 3 partitions, 100-byte messages, on a
 2-core machine that also ran the load generator.

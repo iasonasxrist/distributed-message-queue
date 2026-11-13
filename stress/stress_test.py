@@ -2,8 +2,8 @@
 """
 Stress test for a running pub-sub cluster.
 
-It talks only to the public APIs (producer, consumer, console), so it works
-against `docker compose up` or any other deployment. Three phases:
+It measures the public APIs (producer, consumer, console). Local runs discover
+the Compose ports and obtain a token through the auth container. Three phases:
 
 1. Throughput and latency: writes as fast as possible at increasing numbers
    of concurrent clients, to find where throughput stops growing.
@@ -17,7 +17,7 @@ against `docker compose up` or any other deployment. Three phases:
     pip install requests
     python stress/stress_test.py                      # against docker compose
     python stress/stress_test.py --skip-fault         # load only, nothing is killed
-    python stress/stress_test.py --user admin --password <yours>
+    python stress/stress_test.py --skip-fault --producer-service producer-go
     python stress/stress_test.py --skip-load --scenarios all   # the four shutdown scenarios
 
 Phase 3 uses `docker kill`, `docker stop` and `docker start` on the broker id
@@ -34,11 +34,66 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import requests
 
 CLIENT_TIMEOUT = 20  # seconds a single request may take before it counts as failed
 HTTP = requests.Session()  # carries the sign-in for every call that is not part of the load
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+
+
+class BearerAuth(requests.auth.AuthBase):
+    def __init__(self, token):
+        self.token = token
+
+    def __call__(self, request):
+        request.headers["Authorization"] = f"Bearer {self.token}"
+        return request
+
+
+def compose(*args):
+    return subprocess.run(
+        ["docker", "compose", "--profile", "go", *args], cwd=PROJECT_DIR,
+        capture_output=True, text=True, check=True, timeout=20,
+    ).stdout
+
+
+def configure_cluster(args):
+    """Resolve the running Compose endpoints or use the supplied deployment URLs."""
+    if any((args.producer, args.consumer, args.console)):
+        args.producer = args.producer or "http://localhost:4000"
+        args.consumer = args.consumer or "http://localhost:5000"
+        args.console = args.console or "http://localhost:8080"
+    else:
+        try:
+            for option, service, port in (
+                ("producer", args.producer_service, 5000),
+                ("consumer", "consumer", 5000),
+                ("console", "console", 8080),
+            ):
+                address = compose("port", service, str(port)).strip().splitlines()[0]
+                _, host_port = address.rsplit(":", 1)
+                setattr(args, option, f"http://127.0.0.1:{int(host_port)}")
+            if args.password is None:
+                # Docker access already grants access to the local auth service.
+                # Reuse its token issuer without changing the account or its password.
+                issuer = (
+                    "import sys; import auth; user = auth.load_user(sys.argv[1]); "
+                    "assert user and user['role'] == 'admin', 'Benchmark requires an admin account'; "
+                    "print(auth.make_token(user)[0])"
+                )
+                token = compose("exec", "-T", "auth", "python", "-c", issuer, args.user).strip()
+                if not token:
+                    sys.exit("The local auth service did not return a benchmark token.")
+                HTTP.auth = BearerAuth(token)
+                return
+        except (OSError, subprocess.SubprocessError, IndexError, ValueError) as error:
+            detail = getattr(error, "stderr", None) or str(error)
+            sys.exit(f"Could not configure the local Compose benchmark: {detail.strip()}\n"
+                     "Start the cluster with docker compose --profile go up -d.")
+    HTTP.auth = (args.user, args.password if args.password is not None else "admin")
 
 
 # --- helpers -------------------------------------------------------------------
@@ -449,11 +504,13 @@ def fault_summary(report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--producer", default="http://localhost:4000")
-    parser.add_argument("--consumer", default="http://localhost:5000")
-    parser.add_argument("--console", default="http://localhost:8080")
+    parser.add_argument("--producer-service", choices=["producer", "producer-go"], default="producer",
+                        help="Compose service to measure")
+    parser.add_argument("--producer", help="explicit producer URL for a deployment outside Compose")
+    parser.add_argument("--consumer", help="explicit consumer URL for a deployment outside Compose")
+    parser.add_argument("--console", help="explicit console URL for a deployment outside Compose")
     parser.add_argument("--user", default="admin", help="user to sign in as (needs the admin role)")
-    parser.add_argument("--password", default="admin")
+    parser.add_argument("--password", help="password for an explicit deployment or account")
     parser.add_argument("--partitions", type=int, default=3)
     parser.add_argument("--acks", choices=["all", "majority", "leader"],
                         help="when writes to the test topics are confirmed (default: the cluster's setting)")
@@ -482,10 +539,11 @@ def main():
     unknown = [x for x in args.scenarios if x not in SCENARIOS]
     if unknown:
         parser.error(f"unknown scenario: {', '.join(unknown)}")
-    args.prefix = f"stress-{int(time.time())}"
+    args.prefix = f"stress-{uuid4().hex[:12]}"
 
-    HTTP.auth = (args.user, args.password)
+    configure_cluster(args)
     cluster = Cluster(args)
+    print(f"Producer: {cluster.producer} | Consumer: {cluster.consumer} | Console: {cluster.console}")
     try:
         snapshot = cluster.snapshot()
     except requests.HTTPError as error:
