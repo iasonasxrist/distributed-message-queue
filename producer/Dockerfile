@@ -1,16 +1,16 @@
-# First stage: Build the Python environment and install dependencies
-FROM python:3.12-slim AS builder
+FROM python:3.9
 
+# Set the working directory inside the container
 WORKDIR /app
 
-# Copy requirements file
-COPY . /app
+# Copy the producer script
+COPY producer.py /app/
 
-# ENV PYTHONPATH=/app
+# Install dependencies
+RUN pip install fastapi "uvicorn[standard]" requests kazoo aiohttp python-multipart
 
-# RUN pip install --no-cache-dir -r producer/requirements.txt
-RUN pip install -r producer/requirements.txt
-EXPOSE 5001
+# Expose the FastAPI server port
+EXPOSE 5000
 
-# Run app.py when the container launches
-CMD ["python3", "-m", "producer.producer"]
+# Command to run the producer service
+CMD ["uvicorn", "producer:app", "--host", "0.0.0.0", "--port", "5000", "--no-access-log"]

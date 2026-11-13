@@ -1,212 +1,220 @@
-import logging
-import os
-import time
-from flask import Flask, jsonify, request  # type: ignore
-from externalClusterManager.externalClusterManager import ExternalClusterManager as ex
-from dotenv import load_dotenv
+from typing import Optional
+
+import aiohttp
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 import requests
+import asyncio
+import os
+import json
+import hashlib
+import time
+from kazoo.client import KazooClient
+from kazoo.exceptions import NoNodeError
 
-load_dotenv()  # Load environment variables
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-ZOOKEEPER_HOST = os.environ.get("ZOOKEEPER_HOST", "zookeeper:2181")
+ZOOKEEPER_HOST = os.getenv("ZOOKEEPER_HOST", "zookeeper:2181")
+# Seconds to wait for a broker before giving up
+REQUEST_TIMEOUT = float(os.getenv("BROKER_REQUEST_TIMEOUT", "10"))
+# Seconds to wait for a connection to a broker (a dead broker is noticed this fast)
+CONNECT_TIMEOUT = float(os.getenv("BROKER_CONNECT_TIMEOUT", "2"))
+# How long a write keeps trying while a partition has no reachable leader,
+# for example during a failover (0 = fail at once)
+RETRY_SECONDS = float(os.getenv("PRODUCER_RETRY_SECONDS", "15"))
+zk = KazooClient(hosts=ZOOKEEPER_HOST)
+# One connection pool for all calls to brokers (connections are reused)
+http = requests.Session()
+http.mount("http://", requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=64))
+# Shared secret of the cluster's own services; brokers refuse calls without it
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
+if INTERNAL_TOKEN:
+    http.headers["X-Internal-Token"] = INTERNAL_TOKEN
+class PeerUnreachable(Exception):
+    """The other service could not be reached at all, so it certainly did nothing."""
 
 
-class Producer:
-    def __init__(self):
-        """
-        Initializes the producer with the ZooKeeper connection details and the number of partitions.
-        """
-        self.externalClusterManager = ex()
-        self.num_partitions = int(os.getenv("num_partitions", "3"))  # Default to 3 partitions if not specified
-        self.brokers = []
-        self.broker_assignment_tracker = {} # Dictionary to track leader assignments for partitions
-        logging.info("Producer initialized, connection to zookeeper started")
-        self.watch_topics()
-        self.watch_brokers()
+class PeerError(Exception):
+    """The call failed after it may have reached the other service."""
 
-    def start(self):
+
+class AsyncHTTP:
+    """
+    Calls to other services that do not block the event loop.
+
+    One pool of open connections is shared by all calls. `post` returns
+    (status code, decoded JSON body).
+    """
+
+    def __init__(self, headers):
+        self.headers = headers
+        self._session = None
+
+    async def post(self, url, json=None, timeout=5.0, connect_timeout=None):
+        if self._session is None:   # created on first use, inside the running event loop
+            self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=256))
+        limits = aiohttp.ClientTimeout(total=timeout, sock_connect=connect_timeout)
         try:
-            app.run(host="0.0.0.0", port=int(os.getenv("PRODUCER_PORT", "5001")))
-            logging.info("Server is up and running")
-        except Exception as e:
-            logging.error(f"Application failed to start: {e}")
+            async with self._session.post(url, json=json, headers=dict(self.headers), timeout=limits) as response:
+                return response.status, await response.json(content_type=None)
+        except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as e:
+            raise PeerUnreachable(str(e))
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            raise PeerError(str(e) or type(e).__name__)
 
-    def watch_topics(self):
-        """
-        Watch for new topics created under the /topics path.
-        """
-        @self.externalClusterManager.zkClient.ChildrenWatch("/topics")
-        def on_topic_change(topics):
-            if topics:
-                for topic in topics:
-                    topic_path = f"/topics/{topic}"
-                    self.watch_partitions(topic_path)
-
-    def watch_brokers(self):
-        """
-        Watches for changes in the `/brokers` path in ZooKeeper to keep track of available brokers.
-        """
-        @self.externalClusterManager.zkClient.ChildrenWatch("/brokers")
-        def on_broker_change(brokers):
-            """
-            Args:
-                brokers (list): A list of broker IDs.
-            """
-            if brokers:
-                logging.info(f"| Detected changes | in brokers: {brokers}")
-                self.brokers = brokers
-                self.broker_assignment_tracker = {} # clear the current assignment in case there is a change in the brokers
-
-    def watch_partitions(self, topic_path):
-        """
-        Watch for new partitions under a specific topic path.
-        """
-        @self.externalClusterManager.zkClient.ChildrenWatch(topic_path)
-        def on_partition_change(children_names):
-            for _, children in enumerate(children_names):
-                if children.startswith("partition"):
-                    partition_path = f"{topic_path}/{children}"
-                    self.register_to_partition(partition_path)
-
-    def register_to_partition(self, partition_path):
-            """
-            Register the broker under a specific partition path.
-            Use a different leader broker for each partition.
-            """
-            try:
-                if not self.brokers:
-                    logging.error("No brokers available to assign as leader.")
-                    return
-
-                # Extract topic and partition name
-                topic_name = partition_path.split("/")[2]
-                partition_name = partition_path.split("/")[-1] # e.g., "partition-0"
-
-                # Define key for broker assignment tracker.
-                assignment_key = f"{topic_name}-{partition_name}"
-
-                # If there is no assigned leader for this partition, then assign one.
-                if assignment_key not in self.broker_assignment_tracker:
-                    leader_broker_index = len(self.broker_assignment_tracker) % len(self.brokers) # Select a leader broker based on the amount of assigned partitions so far
-                    leader_broker = self.brokers[leader_broker_index]
-                    self.broker_assignment_tracker[assignment_key] = leader_broker
-                else:
-                    # If there is an assignment for this parition, get the broker from the dictionary.
-                    leader_broker = self.broker_assignment_tracker[assignment_key]
-
-                self.externalClusterManager.zkClient.create(
-                    f"{partition_path}/",
-                    value=bytes(leader_broker, 'utf-8'),
-                    ephemeral=True
-                )
-                logging.info(f"Assigned broker {leader_broker} as leader for partition {partition_path}")
-
-                replica_brokers = [broker for broker in self.brokers if broker != leader_broker]
-                for replica_broker in replica_brokers:
-                    # Added a placeholder message, because I cannot extract the correct message here.
-                    self.send_message_to_broker(replica_broker, topic_name, "replica_message")
-                    logging.info(f"Assigned broker {replica_broker} as replica for partition {partition_path}")
-
-            except Exception as e:
-                logging.error(f"Error on register to partition, {e}")
-                raise e
-
-    def create_topic(self, topic_name) -> bool:
-        """
-        Creates a topic using the externalClusterManager
-        """
-        if not self.externalClusterManager.topic_exists(topic_name):
-            logging.info("Topic does not exist, attempting creation")
-            success = self.externalClusterManager.create_topic(topic_name)  # Store if the topic creation was successful
-            return success  # Return the success value from cluster manager
-        else:
-            logging.info(f"Topic with name: '{topic_name}' already exists, not creating it")
-            return True
-
-    def produce(self, topic_name, message):
-        """
-        Simulates writing a message to a topic.
-
-        Args:
-            topic_name (str): The name of the topic to write to.
-            message (str): The message to send.
-        """
-        logging.info(f"Producing message '{message}' to topic '{topic_name}'")
-        try:
-            # Do not create a topic every time a message is produced.
-            # added broker_id and topic_name because it was missing. Also added the missing parameter to the method call.
-            for broker in self.brokers:
-                self.send_message_to_broker(broker, topic_name, message)
-            logging.info(f"Message '{message}' sent to topic '{topic_name}'.")
-            return True  # Return True if successful.
-
-        except Exception as e:
-            logging.error(f"An error occurred during message production: {e}")
-            return False  # Return False if message production fails.
-
-    def send_message_to_broker(self, broker_id, topic_name, message, retries=3):
-        """
-        Sends a message to a broker via HTTP with retry logic.
-        """
-        broker_url = f"http://{broker_id}:5000/receive_message"
-        payload = {
-            "topic": topic_name,
-            "message": message
-        }
-        # Fixed how the broker requests are called.
-        for attempt in range(retries):
-            try:
-                logging.info(f"Attempt {attempt + 1}: Sending message to broker {broker_id} at {broker_url}")
-                response = requests.post(broker_url, json=payload, timeout=5)  # changed request with requests
-                if response.status_code == 200:
-                    logging.info(f"Message successfully sent to broker {broker_id}")
-                    return
-                else:
-                    raise Exception(f"Broker returned status code {response.status_code}")
-            except Exception as e:
-                logging.error(f"Failed to send message to broker {broker_id}: {e}")
-                time.sleep(1)
-
-    def get_topics(self) -> list:
-        topics = self.externalClusterManager.retrieve_topics()
-        if not topics:
-            return []
-        return topics
+    async def close(self):
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
 
-@app.route("/produce/<topic_name>", methods=["POST"])
-def handle_produce(topic_name):
+http_async = AsyncHTTP(http.headers)
+
+zk.start()
+app = FastAPI()
+
+
+async def wait(seconds: float) -> None:
+    """Pause between two attempts of a write without holding up other requests."""
+    await asyncio.sleep(seconds)
+
+
+def topic_metadata(topic_ID: str) -> dict:
+    data, _ = zk.get(f"/topics/{topic_ID}")
+    return json.loads(data.decode("utf-8"))
+
+
+# --- Sign-in -----------------------------------------------------------------
+# Requests must carry `Authorization: Basic ...` (curl -u user:password) or
+# `Authorization: Bearer <token from the auth service>`. This service does not
+# check passwords itself: it asks the auth service and remembers the answer
+# for AUTH_CACHE_SECONDS, so signing in costs nothing on most requests.
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "1").lower() not in ("0", "false", "no", "")
+AUTH_URL = os.getenv("AUTH_URL", "http://auth:7000")
+AUTH_CACHE_SECONDS = float(os.getenv("AUTH_CACHE_SECONDS", "30"))
+_verified = {}   # hash of the Authorization header -> (valid until, user)
+
+
+def verify_with_auth_service(authorization: str):
+    return http.get(f"{AUTH_URL}/verify", headers={"Authorization": authorization}, timeout=5)
+
+
+async def current_user(authorization: Optional[str] = Header(None)) -> dict:
+    """The signed-in user, or 401."""
+    if not AUTH_ENABLED:
+        return {"username": None, "role": "admin", "must_change_password": False}
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Sign in first", headers={"WWW-Authenticate": 'Basic realm="pubsub"'})
+    key = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
+    remembered = _verified.get(key)
+    if remembered and remembered[0] > time.monotonic():
+        return remembered[1]   # the usual case: no call, no waiting
     try:
-        message = request.get_json().get("message")
-        if not message or not topic_name:
-            return jsonify({"error": "Missing payload"}), 400
-
-        topics = producer.get_topics()
-        if topic_name in topics:
-            return jsonify({"error": "Topic already exists"}), 409  # Use 409 Conflict
-
-        success = producer.create_topic(topic_name)
-        if not success:
-            return jsonify({"error": "Failed to create topic"}), 500
-
-        success = producer.produce(topic_name, message)  # Store if the message was produced successfully
-        if not success:
-            return jsonify({"error": "Failed to produce message"}), 500
-        return jsonify({"message": "Message produced successfully"}), 201  # Use 201 Created
-
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-        return jsonify({"error": "An unexpected error occurred "}), 500  # Return generic error and log it.
+        response = await run_in_threadpool(verify_with_auth_service, authorization)
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail="The auth service is not reachable")
+    if response.status_code == 429:
+        raise HTTPException(status_code=429, detail="Too many wrong passwords. Wait a minute and try again.")
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=401, detail="Wrong username or password, or the sign-in has expired", headers={"WWW-Authenticate": 'Basic realm="pubsub"'}
+        )
+    user = response.json()
+    if len(_verified) > 5000:
+        _verified.clear()
+    _verified[key] = (time.monotonic() + AUTH_CACHE_SECONDS, user)
+    return user
 
 
-@app.route("/get-topics/", methods=["GET"])
-def get_topics():
-    topics = producer.get_topics()
-    return jsonify(topics)
+def admin(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can do this")
+    return user
 
 
-if __name__ == "__main__":
-    producer = Producer()
-    producer.start()
+def as_response(response):
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"detail": response.text}
+    return JSONResponse(status_code=response.status_code, content=body)
+
+
+def forward_to_broker(url: str, **kwargs):
+    """POST to a broker and pass its answer (body and status code) back to the caller."""
+    try:
+        response = http.post(url, timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT), **kwargs)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Broker unavailable: {e}")
+    return as_response(response)
+
+
+# API: Create a new topic
+@app.post("/create_topic/{topic_ID}/{num_partitions}", dependencies=[Depends(admin)])
+def create_topic(topic_ID: str, num_partitions: int, acks: Optional[str] = None):
+    broker_url = f"http://broker:5000/create_topic/{topic_ID}/{num_partitions}"  # Send to one broker
+    return forward_to_broker(broker_url, params={"acks": acks} if acks else None)
+
+
+# API: Write a message to a topic using key-based partitioning
+@app.post("/write/{topic_ID}", dependencies=[Depends(current_user)])
+async def write_message(topic_ID: str, message: dict):
+    # Use key-based hashing to determine partition
+    key = message.get("key")
+    if key is None:
+        raise HTTPException(status_code=400, detail="Key is required for partition selection")
+
+    # While a leader is being replaced the write is tried again for up to
+    # RETRY_SECONDS, so the caller sees one slower write instead of an error.
+    deadline = time.monotonic() + RETRY_SECONDS
+    delay = 0.1
+    while True:
+        try:
+            metadata = await run_in_threadpool(topic_metadata, topic_ID)
+        except NoNodeError:
+            raise HTTPException(status_code=404, detail="Topic not found")
+        partitions = list(metadata["partitions"].keys())
+
+        # str() so numeric keys work and hash like the same key in the consumer's URL
+        partition_id = int(hashlib.sha256(str(key).encode()).hexdigest(), 16) % len(partitions)
+        leader_broker = metadata["partitions"][str(partition_id)]["leader"]
+
+        if leader_broker is None:
+            problem = f"Partition {partition_id} has no leader"
+        else:
+            # Write message to leader broker
+            write_url = f"http://{leader_broker}:5000/write/{topic_ID}/{partition_id}"
+            try:
+                status, body = await http_async.post(
+                    write_url, json=message, timeout=REQUEST_TIMEOUT, connect_timeout=CONNECT_TIMEOUT
+                )
+            except PeerUnreachable:
+                # Connection refused or host gone: the message certainly was not stored, so try again
+                problem = f"Leader {leader_broker} of partition {partition_id} is unreachable"
+            except PeerError:
+                # The broker may have stored the message before the connection broke.
+                # Sending it again could store it twice, so the caller decides.
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"No confirmation from {leader_broker}; the message may or may not have been stored",
+                )
+            else:
+                # 409: that broker is no longer the leader. 503: no leader yet. Nothing was stored.
+                if status not in (409, 503):
+                    return JSONResponse(status_code=status, content=body)
+                problem = f"Partition {partition_id} is changing leader"
+
+        if time.monotonic() + delay > deadline:
+            raise HTTPException(status_code=503, detail=problem)
+        await wait(delay)
+        delay = min(delay * 2, 1.0)
+
+
+# API: Delete a topic
+@app.delete("/delete_topic/{topic_ID}", dependencies=[Depends(admin)])
+def delete_topic(topic_ID: str):
+    topic_path = f"/topics/{topic_ID}"
+    if zk.exists(topic_path):
+        zk.delete(topic_path, recursive=True)
+        return {"status": f"Topic {topic_ID} deleted"}
+    raise HTTPException(status_code=404, detail="Topic not found")

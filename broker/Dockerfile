@@ -1,18 +1,16 @@
-# First stage: Build the Python environment and install dependencies
-FROM python:3.12-slim AS builder
+FROM python:3.9
 
+# Set the working directory inside the container
 WORKDIR /app
 
-# Copy requirements file
-COPY . /app
+# Copy the broker script
+COPY broker.py partition_log.py /app/
 
-# ENV PYTHONPATH=/app
+# Install dependencies
+RUN pip install fastapi "uvicorn[standard]" kazoo requests aiohttp python-multipart
 
-# RUN pip install --no-cache-dir -r broker/requirements.txt
-RUN pip install -r broker/requirements.txt
-
-
+# Expose the FastAPI server port
 EXPOSE 5000
 
-# Run app.py when the container launches
-CMD ["python3", "-m", "broker.broker"]
+# Command to run the broker server
+CMD ["uvicorn", "broker:app", "--host", "0.0.0.0", "--port", "5000", "--no-access-log"]

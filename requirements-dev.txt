@@ -1,0 +1,7 @@
+# Everything needed to run the test suite (no Docker, ZooKeeper or Redis required)
+aiohttp
+fastapi
+httpx
+kazoo
+pytest
+requests
